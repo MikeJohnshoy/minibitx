@@ -1,3 +1,8 @@
+// ittibitx.c
+// A tiny application that initializes the hardware in a sbitx,
+// and allows a remote SDR application to control its operation over the network using
+// a subset of openHPSDR Protocol 1.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -92,4 +97,3 @@ int main(int argc, char **argv) {
 
     return 0;
 }
-
