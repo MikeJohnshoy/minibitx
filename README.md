@@ -9,4 +9,4 @@ Minimal set of code to initialize sbitx hardware and connect to external SDR sof
 
 •	sound_process() performs complex mixing to baseband, passes the arrays of I and Q data to hpsdr_send_iq() for hpsdr Protocol 1 over the network.
 
-•	The external SDR app handles all FFT processing, demodulation, AGC, and audio routing
+•	The external SDR app handles all FFT processing, demodulation of various signal types, and audio routing
