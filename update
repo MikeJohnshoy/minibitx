@@ -1,0 +1,7 @@
+#!/bin/sh -e
+F=$@
+date
+cd $HOME/minibitx
+git stash
+git pull
+echo "minibitx files have been updated successfully."
