@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash
 date
 cd $HOME/minibitx
 git stash
