@@ -8,7 +8,7 @@
 // we define one more lookup table entry than needed, so that each quadrant
 // has both endpoints of 90 degree range
 static int phase_table[MAX_PHASE_COUNT];
-int sampling_freq = 96000;
+int sampling_freq = 48000;    // changed from 96k in sBitx
 // the only time we call this trig function is when we initialize the table
 void vfo_init_phase_table() {
   for (int i = 0; i < MAX_PHASE_COUNT; i++) {
