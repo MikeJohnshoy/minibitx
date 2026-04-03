@@ -43,13 +43,36 @@ void remote_execute(char *command) {
 }
 
 // driven by the ALSA capture thread in sbitx_sound.c
+// Debug/test toggles (set to 1 to enable)
+#define IQ_TEST_TONE         0
+#define IQ_DEBUG_AUDIO_BLOCK 1
+#define IQ_DEBUG_MIX_BLOCK   1
+
 void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speaker,
                    int32_t *output_tx, int n_samples) {
   static double i_samples[4096];
   static double q_samples[4096];
   static int vfo_ready = 0;
 
-  // TEMP TEST: bypass audio input and generate a 1kHz IQ tone
+  if (n_samples > 4096) n_samples = 4096;
+
+#if IQ_DEBUG_AUDIO_BLOCK
+  {
+    static int dbg_blk = 0;
+    if ((dbg_blk++ % 200) == 0) {
+      int32_t minv = 2147483647, maxv = -2147483647;
+      for (int j = 0; j < n_samples; j++) {
+        if (input_rx[j] < minv) minv = input_rx[j];
+        if (input_rx[j] > maxv) maxv = input_rx[j];
+      }
+      printf("audio block n=%d min=%d max=%d first=%d\n",
+             n_samples, minv, maxv, input_rx[0]);
+    }
+  }
+#endif
+
+#if IQ_TEST_TONE
+  // Known-good synthetic IQ source (1 kHz tone @ 48 kHz)
   static double ph = 0.0;
   for (int n = 0; n < n_samples; n++) {
     ph += 2.0 * 3.141592653589793 * 1000.0 / 48000.0;
@@ -57,11 +80,48 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
     i_samples[n] = 0.2 * sin(ph);
     q_samples[n] = 0.2 * cos(ph);
   }
+#else
+  // Normal RX path
+  if (!vfo_ready) {
+    vfo_init_phase_table();
+    vfo_start(&lo, freq_hdr, 0);
+    vfo_ready = 1;
+  }
+
+  for (int n = 0; n < n_samples; n++) {
+    int32_t s = input_rx[n];
+    int lo_i, lo_q;
+    vfo_read_iq(&lo, &lo_i, &lo_q);
+
+    double rf = (double)s / 2147483648.0;                // S32 -> [-1, +1)
+    i_samples[n] = rf * ((double)lo_i / 1073741824.0);   // mix to I
+    q_samples[n] = rf * ((double)lo_q / 1073741824.0);   // mix to Q
+  }
+#endif
+
+#if IQ_DEBUG_MIX_BLOCK
+  {
+    static int dbg_mix = 0;
+    if ((dbg_mix++ % 200) == 0) {
+      double min_i =  1e9, max_i = -1e9;
+      double min_q =  1e9, max_q = -1e9;
+      for (int j = 0; j < n_samples; j++) {
+        if (i_samples[j] < min_i) min_i = i_samples[j];
+        if (i_samples[j] > max_i) max_i = i_samples[j];
+        if (q_samples[j] < min_q) min_q = q_samples[j];
+        if (q_samples[j] > max_q) max_q = q_samples[j];
+      }
+      printf("mix block n=%d I[min=% .6f max=% .6f] Q[min=% .6f max=% .6f]\n",
+             n_samples, min_i, max_i, min_q, max_q);
+    }
+  }
+#endif
+
   hpsdr_send_iq(i_samples, q_samples, n_samples);
 
+  // keep local outputs silent
   memset(output_speaker, 0, n_samples * 2 * sizeof(int32_t));
   memset(output_tx, 0, n_samples * 2 * sizeof(int32_t));
-  return;
 }
 
 // barebones Setup for the WM8731 codec
