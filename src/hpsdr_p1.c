@@ -29,7 +29,7 @@ static pthread_t poll_thread;
 static double iq_buf_i[SAMPLES_PER_PACKET];
 static double iq_buf_q[SAMPLES_PER_PACKET];
 static int iq_buf_count = 0;
-static double hpsdr_iq_gain = 30.0;  // add gain to I and Q data going out
+static double hpsdr_iq_gain = 1.0;  // <<<<< add gain to I and Q data going out
 
 extern void remote_execute(char *command);
 extern int freq_hdr;
@@ -212,17 +212,27 @@ static void handle_command(uint8_t *buf, int len, struct sockaddr_in *sender)
         break;
 
     case 0x04:  // Start / stop streaming
-        if (buf[3] & 0x01) {
-            stream_dest = *sender;
-            stream_dest.sin_port = htons(HPSDR_PORT);   // force IQ stream to 1024
-            tx_seq = 0;
-            iq_buf_count = 0;
-            client_active = 1;
-            printf("hpsdr: streaming STARTED to %s:%d (forced)\n",
-                   inet_ntoa(stream_dest.sin_addr), ntohs(stream_dest.sin_port));
-        } else {
-            client_active = 0;
-            printf("hpsdr: streaming STOPPED\n");
+        {
+            // Some clients use bit0, others send any nonzero in buf[3] for START.
+            int start = ((buf[3] & 0x01) != 0) || (buf[3] != 0x00);
+        
+            if (start) {
+                stream_dest = *sender;
+        
+                // Preferred: send IQ to HPSDR UDP port.
+                // If you want compatibility fallback later, we can add dynamic switching.
+                stream_dest.sin_port = htons(HPSDR_PORT);
+        
+                tx_seq = 0;
+                iq_buf_count = 0;
+                client_active = 1;
+        
+                printf("hpsdr: streaming STARTED cmd=%u to %s:%d\n",
+                       (unsigned)buf[3], inet_ntoa(stream_dest.sin_addr), ntohs(stream_dest.sin_port));
+            } else {
+                client_active = 0;
+                printf("hpsdr: streaming STOPPED cmd=%u\n", (unsigned)buf[3]);
+            }
         }
         break;
 
