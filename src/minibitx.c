@@ -48,42 +48,19 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
   static double q_samples[4096];
   static int vfo_ready = 0;
 
-  // initialize LO once
-  if (!vfo_ready) {
-    vfo_init_phase_table();
-    vfo_start(&lo, freq_hdr, 0);
-    vfo_ready = 1;
-  }
-
-  // channel roles retained from sbitx application
-  //   input_rx  : left channel (RF baseband from codec)
-  //   input_mic : right channel (reserved for future TX path)
-  //   output_*  : muted here; TX/audio can be added later.
+  // TEMP TEST: bypass audio input and generate a 1kHz IQ tone
+  static double ph = 0.0;
   for (int n = 0; n < n_samples; n++) {
-    int32_t s = input_rx[n]; // mono RX sample
-
-    // SOME DEBUG CODE
-    static int dbg=0;
-    if ((dbg++ % 20000)==0) {
-      printf("audio in: input_rx[0]=%d\n", input_rx[0]);
-    }
-    
-    int lo_i, lo_q;
-    vfo_read_iq(&lo, &lo_i, &lo_q);
-    // generate I and Q from single real input sample
-    double rf = (double)s / 2147483648.0; // normalize 32-bit
-    double mix_i = rf * ((double)lo_i / 1073741824.0);
-    double mix_q = rf * ((double)lo_q / 1073741824.0);
-    i_samples[n] = mix_i;
-    q_samples[n] = mix_q;
+    ph += 2.0 * 3.141592653589793 * 1000.0 / 48000.0;
+    if (ph >= 2.0 * 3.141592653589793) ph -= 2.0 * 3.141592653589793;
+    i_samples[n] = 0.2 * sin(ph);
+    q_samples[n] = 0.2 * cos(ph);
   }
-
-  // pass I&Q values to Protocol 1 code
   hpsdr_send_iq(i_samples, q_samples, n_samples);
 
-  // keep local outputs silent
   memset(output_speaker, 0, n_samples * 2 * sizeof(int32_t));
   memset(output_tx, 0, n_samples * 2 * sizeof(int32_t));
+  return;
 }
 
 // barebones Setup for the WM8731 codec
