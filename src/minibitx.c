@@ -6,6 +6,7 @@
 #include "hpsdr_p1.h"
 #include "si5351.h"
 #include "ma_sound.h"
+#include "vfo.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
