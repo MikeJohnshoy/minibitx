@@ -42,7 +42,7 @@ void remote_execute(char *command) {
   }
 }
 
-// driven by the ALSA capture thread in sbitx_sound.c
+// driven by the ALSA capture thread in sound.c
 // Debug/test toggles (set to 1 to enable)
 #define IQ_TEST_TONE         0
 #define IQ_DEBUG_AUDIO_BLOCK 1
