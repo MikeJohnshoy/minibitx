@@ -137,12 +137,18 @@ static void build_and_send_packet(void)
         // DEBUG CODE TO SEE IF PKTS ARE GOING OUT
         static int dbg = 0;
         if ((dbg++ % 200) == 0) {
-            printf("EP6 seq=%u cc0=%02X cc1=%02X i0=%02X%02X%02X q0=%02X%02X%02X\n",
-                   tx_seq - 1,
-                   pkt[11],          // frame0 C0
-                   pkt[11 + 512],    // frame1 C0
-                   pkt[16], pkt[17], pkt[18],
-                   pkt[19], pkt[20], pkt[21]);
+            int32_t max_i = 0, max_q = 0;
+            for (int s = 0; s < 63 * 2; s++) {
+                int off = 16 + s * 8; // first sample starts at pkt[16]
+                int32_t i = (int32_t)((pkt[off+0] << 16) | (pkt[off+1] << 8) | pkt[off+2]);
+                int32_t q = (int32_t)((pkt[off+3] << 16) | (pkt[off+4] << 8) | pkt[off+5]);
+                if (i & 0x800000) i |= ~0xFFFFFF; // sign-extend 24b
+                if (q & 0x800000) q |= ~0xFFFFFF;
+                if (abs(i) > max_i) max_i = abs(i);
+                if (abs(q) > max_q) max_q = abs(q);
+            }
+            printf("EP6 seq=%u maxI=%d maxQ=%d firstI=%02X%02X%02X firstQ=%02X%02X%02X\n",
+               tx_seq - 1, max_i, max_q, pkt[16], pkt[17], pkt[18], pkt[19], pkt[20], pkt[21]);
         }
         sendto(hpsdr_sock, pkt, sizeof(pkt), 0,
                (struct sockaddr *)&stream_dest, sizeof(stream_dest));
