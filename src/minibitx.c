@@ -136,7 +136,7 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
 // barebones Setup for the WM8731 codec
 void setup_audio_codec() {
   sound_mixer("hw:0", "Input Mux", 0);
-  sound_mixer("hw:0", "Line", 1);
+  sound_mixer("hw:0", "Line", 80);  // 80% of max
   sound_mixer("hw:0", "Mic", 0);
   sound_mixer("hw:0", "Master", 0); // Mute local speaker
 }
