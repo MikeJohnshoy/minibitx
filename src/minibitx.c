@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 // globals
 int freq_hdr = 7074000;   // current freq we are tuned to, until we get commanded from remote
