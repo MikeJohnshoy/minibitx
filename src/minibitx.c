@@ -89,6 +89,12 @@ void setup_audio_codec() {
 
 int main(int argc, char **argv) {
   printf("Starting miniBitx IQ Streamer...\n");
+  
+  // Initialize wiringPi (must be done before any pinMode/digitalRead/Write)
+  if (wiringPiSetupGpio() < 0) {            // or wiringPiSetup()
+    fprintf(stderr, "Failed to init wiringPi\n");
+    return -1;
+  }
 
   // Initialize Hardware (I2C & si5351 Clock), filters, and software vfo
   i2cbb_init();
