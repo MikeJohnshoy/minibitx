@@ -51,7 +51,8 @@ static void build_and_send_packet(void)
     pkt[5] = (tx_seq >> 16) & 0xFF;
     pkt[6] = (tx_seq >>  8) & 0xFF;
     pkt[7] =  tx_seq        & 0xFF;
-    
+
+    // Use current sequence to derive C&C address cadence, then increment once per packet
     uint32_t seq_for_cc = tx_seq++;
 
     // Two 512-byte frames
@@ -61,20 +62,46 @@ static void build_and_send_packet(void)
         // Sync bytes
         fp[0] = 0x7F; fp[1] = 0x7F; fp[2] = 0x7F;
 
-        // C&C control bytes (cycle through C0 addresses 0 and 1)
-        int cc_addr = (seq_for_cc * 2 + frame) % 2;
-        fp[3] = (cc_addr << 1) | (in_tx ? 1 : 0);
+        // C&C control byte:
+        // bit0 = MOX (TX flag), bits[5:1] = C0 address 0..31
+        int cc_addr = (int)((seq_for_cc * 2 + frame) & 0x1F);
+        fp[3] = (uint8_t)((cc_addr << 1) | (in_tx ? 1 : 0));
 
-        if (cc_addr == 0) {
-            fp[4] = (freq_hdr >> 24) & 0xFF;
-            fp[5] = (freq_hdr >> 16) & 0xFF;
-            fp[6] = (freq_hdr >>  8) & 0xFF;
-            fp[7] =  freq_hdr        & 0xFF;
-        } else if (cc_addr == 1) {
-            fp[4] = 0x00;   // 48 kHz, no ADC overflow
-            fp[5] = 0x00;
-            fp[6] = 0x00;
-            fp[7] = 0x00;
+        // Fill control payload bytes [4..7] by C0 address
+        // Keep this minimal but consistent with your current behavior.
+        switch (cc_addr) {
+            case 0:
+                // Receiver 1 frequency (network byte order)
+                fp[4] = (freq_hdr >> 24) & 0xFF;
+                fp[5] = (freq_hdr >> 16) & 0xFF;
+                fp[6] = (freq_hdr >>  8) & 0xFF;
+                fp[7] =  freq_hdr        & 0xFF;
+                break;
+
+            case 1:
+                // Basic status/sample-rate flags
+                // Keep as zero for now (48k/no-overflow baseline in your prior code)
+                fp[4] = 0x00;
+                fp[5] = 0x00;
+                fp[6] = 0x00;
+                fp[7] = 0x00;
+                break;
+
+            case 2:
+                // Mirror RX frequency here too to satisfy clients that watch addr 2 traffic
+                fp[4] = (freq_hdr >> 24) & 0xFF;
+                fp[5] = (freq_hdr >> 16) & 0xFF;
+                fp[6] = (freq_hdr >>  8) & 0xFF;
+                fp[7] =  freq_hdr        & 0xFF;
+                break;
+
+            default:
+                // Leave zeros for unimplemented C&C addresses
+                fp[4] = 0x00;
+                fp[5] = 0x00;
+                fp[6] = 0x00;
+                fp[7] = 0x00;
+                break;
         }
 
         // 63 IQ samples per frame
@@ -90,16 +117,16 @@ static void build_and_send_packet(void)
             if (q_val > 8388607) q_val = 8388607;
             if (q_val < -8388608) q_val = -8388608;
 
-            // Pack I
+            // Pack I (24-bit signed)
             sp[0] = (i_val >> 16) & 0xFF;
             sp[1] = (i_val >>  8) & 0xFF;
             sp[2] =  i_val        & 0xFF;
 
-            // Pack Q
+            // Pack Q (24-bit signed)
             sp[3] = (q_val >> 16) & 0xFF;
             sp[4] = (q_val >>  8) & 0xFF;
             sp[5] =  q_val        & 0xFF;
-            
+
             // Mic sample (unused)
             sp[6] = 0;
             sp[7] = 0;
@@ -136,63 +163,94 @@ void hpsdr_send_iq(double *i_samples, double *q_samples, int n)
 
 static void handle_command(uint8_t *buf, int len, struct sockaddr_in *sender)
 {
-    if (len < 4 || buf[0] != 0xEF || buf[1] != 0xFE) return;
+    if (len < 4) return;
+    if (buf[0] != 0xEF || buf[1] != 0xFE) return;
 
     switch (buf[2]) {
     case 0x02:  // Discovery request
         {
             uint8_t reply[64];
             memset(reply, 0, sizeof(reply));
-            reply[0] = 0xEF; reply[1] = 0xFE; reply[2] = 0x02;
-            
-            // 0x00 = available, 0x02 = in-use
-            int same_client = (sender->sin_addr.s_addr == stream_dest.sin_addr.s_addr);
+
+            reply[0] = 0xEF;
+            reply[1] = 0xFE;
+            reply[2] = 0x02;
+
+            // 0x00 = available, 0x02 = in-use by another client
+            int same_client =
+                (client_active &&
+                 sender->sin_addr.s_addr == stream_dest.sin_addr.s_addr &&
+                 sender->sin_port        == stream_dest.sin_port);
+
             reply[3] = (client_active && !same_client) ? 0x02 : 0x00;
 
-            // Fake MAC address & board info (Hermes)
-            reply[4] = 0x00; reply[5] = 0x1C; reply[6] = 0xC0;
-            reply[7] = 0xA2; reply[8] = 0x22; reply[9] = 0x5B;
-            reply[10] = 0x06; // Board type
-            reply[11] = 0x25; // Protocol version
+            // MAC + board/protocol identifiers (keep your current values for now)
+            reply[4]  = 0x00; reply[5]  = 0x1C; reply[6]  = 0xC0;
+            reply[7]  = 0xA2; reply[8]  = 0x22; reply[9]  = 0x5B;
+            reply[10] = 0x06; // board type
+            reply[11] = 0x25; // protocol version
 
             sendto(hpsdr_sock, reply, sizeof(reply), 0,
                    (struct sockaddr *)sender, sizeof(*sender));
         }
         break;
 
-    case 0x04:  // Start / stop streaming
-        if (buf[3] & 0x01) {
-            stream_dest = *sender;
-            tx_seq = 0;
-            iq_buf_count = 0;
-            client_active = 1;
-            printf("hpsdr: streaming STARTED to %s:%d\n", inet_ntoa(stream_dest.sin_addr), ntohs(stream_dest.sin_port));
-        } else {
-            client_active = 0;
-            printf("hpsdr: streaming STOPPED\n");
+    case 0x04:  // Start/Stop streaming
+        {
+            // Some clients use bit0, some send nonzero in buf[3] for start.
+            int start = (buf[3] & 0x01) || (buf[3] != 0x00);
+
+            if (start) {
+                stream_dest = *sender;
+                tx_seq = 0;
+                iq_buf_count = 0;
+                client_active = 1;
+                printf("hpsdr: streaming STARTED to %s:%d\n",
+                       inet_ntoa(stream_dest.sin_addr), ntohs(stream_dest.sin_port));
+            } else {
+                client_active = 0;
+                printf("hpsdr: streaming STOPPED\n");
+            }
         }
         break;
 
     case 0x01:  // EP2 host commands
-        if (len >= HPSDR_PKT_SIZE) {
-            for (int frame = 0; frame < 2; frame++) {
+        {
+            // Accept full 1032-byte packet, but also parse shorter packets that still contain one frame.
+            if (len < 16) break; // not enough for header + sync + c0 + data
+
+            int frames_available = 0;
+            if (len >= 8 + 512 + 512) frames_available = 2;
+            else if (len >= 8 + 512)  frames_available = 1;
+            else                       frames_available = 0;
+
+            for (int frame = 0; frame < frames_available; frame++) {
                 uint8_t *fp = buf + 8 + frame * 512;
                 if (fp[0] != 0x7F || fp[1] != 0x7F || fp[2] != 0x7F) continue;
 
-                int c0 = fp[3];
+                int c0   = fp[3];
                 int addr = (c0 >> 1) & 0x1F;
 
-                if (addr == 0x02) { // Remote frequency set
-                    int f = (fp[4] << 24) | (fp[5] << 16) | (fp[6] << 8) | fp[7];
+                // Frequency updates are commonly seen on addr 0x00 or 0x02 depending on client/profile.
+                if (addr == 0x00 || addr == 0x02) {
+                    int f = ((int)fp[4] << 24) | ((int)fp[5] << 16) |
+                            ((int)fp[6] <<  8) |  (int)fp[7];
+
                     if (f > 0 && f != freq_hdr) {
-                        printf("hpsdr: remote set freq %d Hz\n", f);
+                        printf("hpsdr: remote set freq %d Hz (addr=%d)\n", f, addr);
                         char cmd[50];
-                        sprintf(cmd, "freq %d", f);
+                        snprintf(cmd, sizeof(cmd), "freq %d", f);
                         remote_execute(cmd);
                     }
                 }
+
+                // Track MOX from host control bit (optional but useful)
+                in_tx = (c0 & 0x01) ? 1 : 0;
             }
         }
+        break;
+
+    default:
         break;
     }
 }
