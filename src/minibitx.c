@@ -54,9 +54,13 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
   static double q_samples[4096];
   static int vfo_ready = 0;
 
+  // Runtime test switch (NO preprocessor confusion)
+  // 0 = normal RX->IQ path, 1 = synthetic tone path
+  static int force_tone = 0;
+
   if (n_samples > 4096) n_samples = 4096;
 
-#if IQ_DEBUG_AUDIO_BLOCK
+  // Audio input debug
   {
     static int dbg_blk = 0;
     if ((dbg_blk++ % 200) == 0) {
@@ -69,38 +73,43 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
              n_samples, minv, maxv, input_rx[0]);
     }
   }
-#endif
 
-#if IQ_TEST_TONE
-  // Known-good synthetic IQ source (1 kHz tone @ 48 kHz)
-  static double ph = 0.0;
-  for (int n = 0; n < n_samples; n++) {
-    ph += 2.0 * 3.141592653589793 * 1000.0 / 48000.0;
-    if (ph >= 2.0 * 3.141592653589793) ph -= 2.0 * 3.141592653589793;
-    i_samples[n] = 0.2 * sin(ph);
-    q_samples[n] = 0.2 * cos(ph);
+  if (force_tone) {
+    static int once_tone = 0;
+    if (!once_tone++) printf("### TONE PATH ACTIVE ###\n");
+
+    static double ph = 0.0;
+    for (int n = 0; n < n_samples; n++) {
+      ph += 2.0 * 3.141592653589793 * 1000.0 / 48000.0;
+      if (ph >= 2.0 * 3.141592653589793) ph -= 2.0 * 3.141592653589793;
+      i_samples[n] = 0.2 * sin(ph);
+      q_samples[n] = 0.2 * cos(ph);
+    }
+  } else {
+    static int once_norm = 0;
+    if (!once_norm++) printf("### NORMAL RX PATH ACTIVE ###\n");
+
+    if (!vfo_ready) {
+      vfo_init_phase_table();
+      vfo_start(&lo, freq_hdr, 0);
+      vfo_ready = 1;
+    }
+
+    for (int n = 0; n < n_samples; n++) {
+      int32_t s = input_rx[n];
+      int lo_i, lo_q;
+      vfo_read_iq(&lo, &lo_i, &lo_q);
+
+      // S32 -> [-1, +1)
+      double rf = (double)s / 2147483648.0;
+
+      // Mix to IQ
+      i_samples[n] = rf * ((double)lo_i / 1073741824.0);
+      q_samples[n] = rf * ((double)lo_q / 1073741824.0);
+    }
   }
-#else
-  // Normal RX path
-  printf("NORMAL RX PATH ACTIVE\n");
-  if (!vfo_ready) {
-    vfo_init_phase_table();
-    vfo_start(&lo, freq_hdr, 0);
-    vfo_ready = 1;
-  }
 
-  for (int n = 0; n < n_samples; n++) {
-    int32_t s = input_rx[n];
-    int lo_i, lo_q;
-    vfo_read_iq(&lo, &lo_i, &lo_q);
-
-    double rf = (double)s / 2147483648.0;                // S32 -> [-1, +1)
-    i_samples[n] = rf * ((double)lo_i / 1073741824.0);   // mix to I
-    q_samples[n] = rf * ((double)lo_q / 1073741824.0);   // mix to Q
-  }
-#endif
-
-#if IQ_DEBUG_MIX_BLOCK
+  // Mixed IQ debug
   {
     static int dbg_mix = 0;
     if ((dbg_mix++ % 200) == 0) {
@@ -116,7 +125,6 @@ void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speake
              n_samples, min_i, max_i, min_q, max_q);
     }
   }
-#endif
 
   hpsdr_send_iq(i_samples, q_samples, n_samples);
 
