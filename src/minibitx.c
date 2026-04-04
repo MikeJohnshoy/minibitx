@@ -13,6 +13,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
+#include <wiringPi.h>  // already linked via wiringPi
+
+// LPF relay GPIO pins (wiringPi numbering, matching sBitx v2 hardware)
+#define LPF_A 5
+#define LPF_B 6
+#define LPF_C 10
+#define LPF_D 11
 
 // globals
 int freq_hdr = 7074000;   // current freq we are tuned to, until we get commanded from remote
@@ -20,16 +27,38 @@ int in_tx = 0;            // 0 = RX,  1 = TX
 int bfo_freq = 40035000;  // center frequency of our crystal filter (40.035 mHz)
 static struct vfo lo;     // LO for RX quadrature mixing values
 
+static int prev_lpf = -1;
+
+void set_lpf_40mhz(int frequency) {
+    int lpf = 0;
+    if (frequency < 5500000)
+        lpf = LPF_D;           // 80m/160m
+    else if (frequency < 10500000)
+        lpf = LPF_C;           // 40m/30m
+    else if (frequency < 18500000)
+        lpf = LPF_B;           // 20m/17m
+    else if (frequency < 30000000)
+        lpf = LPF_A;           // 15m/12m/10m
+
+    if (lpf == prev_lpf)
+        return;
+
+    digitalWrite(LPF_A, LOW);
+    digitalWrite(LPF_B, LOW);
+    digitalWrite(LPF_C, LOW);
+    digitalWrite(LPF_D, LOW);
+
+    digitalWrite(lpf, HIGH);
+    prev_lpf = lpf;
+    printf("LPF: selected pin %d for %d Hz\n", lpf, frequency);
+}
 // tuning
 void radio_tune_to(u_int32_t f) {
-  freq_hdr = f;
-  // set Si5351 (oscillator 2 used for RX in sBitx)
-  // the IF offset is subtracted here
-  si5351bx_setfreq(2, f + bfo_freq - 24000);
-  // keep software LO in step with hardware tuning
-  vfo_start(&lo, freq_hdr, lo.phase);
-  // call set_lpf_40mhz(f) here for bandpass filter switching
-  printf("Tuned to: %d Hz\n", f);
+    freq_hdr = f;
+    si5351bx_setfreq(2, f + bfo_freq - 24000);
+    vfo_start(&lo, freq_hdr, lo.phase);
+    set_lpf_40mhz(f);    // enable the correct LPF for this band
+    printf("Tuned to: %d Hz\n", f);
 }
 
 // hpsdr_p1.c parses EP2 host commands and calls this to change frequency
