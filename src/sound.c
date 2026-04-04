@@ -135,58 +135,32 @@ static void *audio_loop(void *arg)
 {
     (void)arg;
 
-    /* Interleaved stereo buffers (L/R × PERIOD_FRAMES) */
     int32_t cap_buf[MAX_FRAMES * CHANNELS];
-    int32_t play_buf[MAX_FRAMES * CHANNELS];
-
-    /* De-interleaved mono buffers passed to the callback */
     int32_t rx_buf[MAX_FRAMES];
     int32_t mic_buf[MAX_FRAMES];
     int32_t spk_buf[MAX_FRAMES];
     int32_t tx_buf[MAX_FRAMES];
 
-    /* Pre-fill playback with silence so the device is running */
-    memset(play_buf, 0, sizeof(play_buf));
-    snd_pcm_writei(pcm_playback, play_buf, PERIOD_FRAMES);
-    snd_pcm_writei(pcm_playback, play_buf, PERIOD_FRAMES);
-
     while (g_running) {
-        /* ---------- capture ---------- */
-        snd_pcm_sframes_t frames = snd_pcm_readi(pcm_capture, cap_buf,
-                                                  PERIOD_FRAMES);
+        snd_pcm_sframes_t frames = snd_pcm_readi(pcm_capture, cap_buf, PERIOD_FRAMES);
         if (frames < 0) {
             if (xrun_recover(pcm_capture, (int)frames) < 0) {
                 fprintf(stderr, "sound: capture recovery failed\n");
                 break;
             }
-            continue;           /* retry after recovery */
+            continue;
         }
 
         int n = (int)frames;
         if (n > MAX_FRAMES) n = MAX_FRAMES;
 
-        /* De-interleave stereo capture → two mono arrays */
         for (int i = 0; i < n; i++) {
-            rx_buf[i]  = cap_buf[i * 2];       /* left  = RF baseband */
-            mic_buf[i] = cap_buf[i * 2 + 1];   /* right = mic / spare */
+            rx_buf[i]  = cap_buf[i * 2];
+            mic_buf[i] = cap_buf[i * 2 + 1];
         }
 
-        /* ---------- process ---------- */
         sound_process(rx_buf, mic_buf, spk_buf, tx_buf, n);
-
-        /* ---------- playback ---------- */
-        for (int i = 0; i < n; i++) {
-            play_buf[i * 2]     = spk_buf[i];
-            play_buf[i * 2 + 1] = tx_buf[i];
-        }
-
-        snd_pcm_sframes_t written = snd_pcm_writei(pcm_playback, play_buf, n);
-        if (written < 0) {
-            if (xrun_recover(pcm_playback, (int)written) < 0) {
-                fprintf(stderr, "sound: playback recovery failed\n");
-                break;
-            }
-        }
+        // No playback write — output goes over HPSDR network
     }
 
     return NULL;
@@ -202,19 +176,14 @@ int sound_thread_start(const char *device_name)
     pcm_capture = open_pcm(dev, SND_PCM_STREAM_CAPTURE);
     if (!pcm_capture) return -1;
 
-    pcm_playback = open_pcm(dev, SND_PCM_STREAM_PLAYBACK);
-    if (!pcm_playback) {
-        snd_pcm_close(pcm_capture);
-        pcm_capture = NULL;
-        return -1;
-    }
+    // No playback needed — IQ goes out over the network, not local audio
+    pcm_playback = NULL;
 
     g_running = 1;
     if (pthread_create(&audio_thread, NULL, audio_loop, NULL) != 0) {
         fprintf(stderr, "sound: pthread_create failed\n");
         snd_pcm_close(pcm_capture);
-        snd_pcm_close(pcm_playback);
-        pcm_capture = pcm_playback = NULL;
+        pcm_capture = NULL;
         g_running = 0;
         return -1;
     }
