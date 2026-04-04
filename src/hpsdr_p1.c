@@ -134,18 +134,21 @@ static void build_and_send_packet(void)
     }
 
     if (client_active) {
-        // DEBUG CODE TO SEE IF PKTS ARE GOING OUT
         static int dbg = 0;
         if ((dbg++ % 200) == 0) {
+            // THIS IS FOR DEBUG
             int32_t max_i = 0, max_q = 0;
-            for (int s = 0; s < 63 * 2; s++) {
-                int off = 16 + s * 8; // first sample starts at pkt[16]
-                int32_t i = (int32_t)((pkt[off+0] << 16) | (pkt[off+1] << 8) | pkt[off+2]);
-                int32_t q = (int32_t)((pkt[off+3] << 16) | (pkt[off+4] << 8) | pkt[off+5]);
-                if (i & 0x800000) i |= ~0xFFFFFF; // sign-extend 24b
-                if (q & 0x800000) q |= ~0xFFFFFF;
-                if (abs(i) > max_i) max_i = abs(i);
-                if (abs(q) > max_q) max_q = abs(q);
+            for (int frame = 0; frame < 2; frame++) {
+                int base = 8 + frame * 512 + 8; // skip EP6 hdr + frame sync/C&C
+                for (int s = 0; s < 63; s++) {
+                    int off = base + s * 8;
+                    int32_t i = (int32_t)((pkt[off+0] << 16) | (pkt[off+1] << 8) | pkt[off+2]);
+                    int32_t q = (int32_t)((pkt[off+3] << 16) | (pkt[off+4] << 8) | pkt[off+5]);
+                    if (i & 0x800000) i |= ~0xFFFFFF;
+                    if (q & 0x800000) q |= ~0xFFFFFF;
+                    if (abs(i) > max_i) max_i = abs(i);
+                    if (abs(q) > max_q) max_q = abs(q);
+                }
             }
             printf("EP6 seq=%u maxI=%d maxQ=%d firstI=%02X%02X%02X firstQ=%02X%02X%02X\n",
                tx_seq - 1, max_i, max_q, pkt[16], pkt[17], pkt[18], pkt[19], pkt[20], pkt[21]);
