@@ -1,4 +1,4 @@
-# minibitx    -- an experimental test bed  --
+# minibitx    -- an experimental test bed
 STATUS  Compiles, establishes connection with SDRConsole, but no IQ data being passed yet ...
 
 Minimal set of code to initialize sbitx hardware and connect to external SDR software, like quisk or SDRConsole.
