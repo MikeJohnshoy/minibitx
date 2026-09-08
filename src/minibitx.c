@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
 
-  printf("Starting miniBitx hardware interface & SDR server...\n");
+  printf("Starting miniBitx IQ Streamer and control interface...\n");
 
   // Installed first, before anything below can fail/return early - every
   // _stop() function called from the shutdown sequence already guards on
@@ -143,6 +143,19 @@ int main(int argc, char **argv) {
     printf("init: USB IQ gadget unavailable, continuing without it\n");
   }
 
+  // Bring up the Kenwood TS-480-subset CAT control surface (the CAT
+  // section of src/usb_gadget.c) over the same USB gadget's CDC-ACM
+  // function. This rides on whatever
+  // uac_init() just did above (both functions are created/bound together
+  // in usb_gadget.c) but is independent from here on: cat_init() opens
+  // /dev/ttyGS0 itself, on its own thread, and keeps retrying with backoff
+  // whether or not the ACM function ever actually came up (no USB gadget
+  // support at all, or the bind above failed) - not a hard failure, same
+  // as every other control surface here.
+  if (cat_init() < 0) {
+    printf("init: CAT (ACM) unavailable, continuing without it\n");
+  }
+
   // Initialize Audio
   setup_audio_codec();
   printf("init: WM8731 audio codec configured\n");
@@ -182,6 +195,7 @@ int main(int argc, char **argv) {
   // it, so uac_stop()/hpsdr_stop() below see a stream that's already
   // quiet rather than racing sound.c's real-time thread mid-teardown.
   sound_thread_stop();
+  cat_stop();
   uac_stop();
   hpsdr_stop();
   hamlib_stop();
