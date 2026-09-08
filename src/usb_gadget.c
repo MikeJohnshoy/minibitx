@@ -21,6 +21,13 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <termios.h>
+#include "cw.h"
+
+extern int freq_hdr;    // current frequency, Hz - see radio.h
+extern int in_tx;       // 0 = RX, 1 = TX - see radio.h
+extern void radio_tune_to(uint32_t f);
+extern void radio_set_tx(int tx_on);
 
 /* ---------------------------------------------------------------------
  * Compile-time configuration
@@ -245,6 +252,23 @@ static int uac_gadget_create(void) {
     snprintf(path, sizeof(path), "%s/functions/uac2.0/p_chmask", UAC_GADGET_ROOT);
     uac_write_attr(path, "3");
 
+    // --- ACM (CDC-ACM) function: Kenwood TS-480-subset CAT control ---
+    // See the CAT section near the bottom of this file and
+    // docs/04_remote_control_and_iq_output.md. Unlike
+    // uac2.0 above, the kernel's f_acm function has essentially no
+    // configurable attributes to set here (just a read-only port_num) -
+    // creating the directory is the whole job. Binding this gives us
+    // /dev/ttyGS0 on this side; Windows 10/11 auto-binds its inbox
+    // usbser.sys driver on the host side with no custom INF, since this
+    // presents as a standard bInterfaceClass=0x02/bInterfaceSubClass=0x02
+    // CDC-ACM interface - same "just works" story UAC2 already gets for
+    // audio class devices.
+    snprintf(path, sizeof(path), "%s/functions/acm.usb0", UAC_GADGET_ROOT);
+    if (uac_mkdir(path) < 0 && errno != EEXIST) {
+        fprintf(stderr, "uac: cannot create acm function: %s\n", strerror(errno));
+        return -1;
+    }
+
     // --- Config c.1 ---
     snprintf(path, sizeof(path), "%s/configs/c.1", UAC_GADGET_ROOT);
     uac_mkdir(path);
@@ -264,6 +288,10 @@ static int uac_gadget_create(void) {
     snprintf(link_path, sizeof(link_path), "%s/configs/c.1/uac2.0", UAC_GADGET_ROOT);
     uac_symlink(func_abs, link_path);
 
+    snprintf(func_abs,  sizeof(func_abs),  "%s/functions/acm.usb0", UAC_GADGET_ROOT);
+    snprintf(link_path, sizeof(link_path), "%s/configs/c.1/acm.usb0", UAC_GADGET_ROOT);
+    uac_symlink(func_abs, link_path);
+
     // --- Bind to the UDC ---
     char udc_name[256] = {0};   // sized to match dirent.d_name's worst case
     if (uac_find_udc(udc_name, sizeof(udc_name)) < 0) {
@@ -277,7 +305,7 @@ static int uac_gadget_create(void) {
         return -1;
     }
 
-    printf("init: USB IQ gadget bound to UDC '%s'\n", udc_name);
+    printf("init: USB gadget bound to UDC '%s' (UAC2 audio + ACM CAT)\n", udc_name);
     return 0;
 }
 
@@ -300,19 +328,22 @@ static void uac_gadget_destroy(void) {
     snprintf(path, sizeof(path), "%s/UDC", UAC_GADGET_ROOT);
     uac_write_attr(path, "\n");
 
-    // Remove the function symlink from the config
+    // Remove the function symlinks from the config
     snprintf(path, sizeof(path), "%s/configs/c.1/uac2.0", UAC_GADGET_ROOT);
+    unlink(path);
+    snprintf(path, sizeof(path), "%s/configs/c.1/acm.usb0", UAC_GADGET_ROOT);
     unlink(path);
 
     // Remove config strings, config, function strings directories in order
     // (configfs requires directories to be emptied before rmdir)
-    char dirs[5][256];
+    char dirs[6][256];
     snprintf(dirs[0], 256, "%s/configs/c.1/strings/0x409",  UAC_GADGET_ROOT);
     snprintf(dirs[1], 256, "%s/configs/c.1",                UAC_GADGET_ROOT);
     snprintf(dirs[2], 256, "%s/functions/uac2.0",           UAC_GADGET_ROOT);
-    snprintf(dirs[3], 256, "%s/strings/0x409",              UAC_GADGET_ROOT);
-    snprintf(dirs[4], 256, "%s",                            UAC_GADGET_ROOT);
-    for (int i = 0; i < 5; i++)
+    snprintf(dirs[3], 256, "%s/functions/acm.usb0",         UAC_GADGET_ROOT);
+    snprintf(dirs[4], 256, "%s/strings/0x409",              UAC_GADGET_ROOT);
+    snprintf(dirs[5], 256, "%s",                            UAC_GADGET_ROOT);
+    for (int i = 0; i < 6; i++)
         rmdir(dirs[i]);   // silently tolerate ENOTEMPTY / ENOENT
 
     printf("uac: gadget removed\n");
@@ -647,4 +678,307 @@ void uac_stop(void) {
 
 int uac_is_active(void) {
     return uac_active;
+}
+
+/* =======================================================================
+ * Kenwood TS-480-subset CAT control, over this same gadget's CDC-ACM
+ * function (see uac_gadget_create() above for where acm.usb0 is created
+ * and bound - this section is what actually reads/writes the resulting
+ * /dev/ttyGS0). Folded into this file rather than kept as its own
+ * translation unit because both are, at this point, just two functions of
+ * one composite USB gadget: acm.usb0 doesn't exist independently of the
+ * gadget lifecycle usb_gadget.c already owns (uac_gadget_create()/
+ * uac_gadget_destroy() create and tear down both functions together), so
+ * splitting the code that talks to it into a separate cat.c gave a
+ * misleading impression of independence that the configfs layer doesn't
+ * actually have.
+ *
+ * This exists for control surfaces that only know how to talk CAT to a
+ * real (or real-enough) Kenwood radio - FLRig chief among them, since it
+ * has no generic "connect to a Hamlib rigctld-style server" option the
+ * way WSJT-X does. WSJT-X keeps using the existing Hamlib NET rigctl
+ * server (hamlib.c) unchanged; this is a second, independent control
+ * surface, not a replacement. See
+ * docs/04_remote_control_and_iq_output.md for the command set and why
+ * TS-480 specifically, and docs/usb_gadget_os_setup.md §13 for the
+ * bench-test checklist (this combination - UAC2 + ACM in one composite
+ * gadget - is new and not yet bench-tested as of this writing).
+ *
+ * Like the rest of this file, this is best-effort: cat_init() failing
+ * (most commonly because the ACM function isn't bound - no USB gadget
+ * support on this hardware/kernel, or the gadget bind above failed) is
+ * not fatal. minibitx keeps running on whatever subset of control
+ * surfaces actually came up.
+ *
+ * Unlike hamlib.c's TCP server, there's no accept()/one-thread-per-client
+ * model needed here: a USB gadget serial function is inherently one
+ * logical connection at a time (whatever's on the other end of the
+ * cable), so this is a single persistent reader thread that opens the
+ * device once and keeps re-opening it if it ever drops (gadget rebind,
+ * cable unplugged/replugged, host closed the port).
+ * ======================================================================= */
+
+#define CAT_TTY_PATH   "/dev/ttyGS0"
+#define CAT_LINE_MAX   64
+#define CAT_OPEN_RETRY_MAX_MS 1000   // backoff cap while the device is missing/erroring
+
+static volatile int cat_running = 0;
+static int cat_fd = -1;
+static pthread_t cat_thread_tid;
+
+// Cosmetic-only "current mode" state, same idea as hamlib.c's current_mode -
+// minibitx has no onboard demod and (as of this writing) can only actually
+// transmit CW, so "3" (Kenwood's MD code for CW) is the honest default
+// rather than pretending to support modes nothing downstream can produce.
+// MD set requests are still accepted and stored, same as Hamlib's M/m, in
+// case a future TX audio path (see the FLRig/WSJT-X design discussion)
+// makes other modes real.
+static char cat_current_mode[2] = "3";
+
+static void cat_send(const char *s)
+{
+    if (cat_fd < 0) return;
+    // Best-effort - a port that's not actually open on the host side isn't
+    // fatal, same spirit as hamlib.c's send_line() using MSG_NOSIGNAL.
+    ssize_t n = write(cat_fd, s, strlen(s));
+    (void)n;
+}
+
+// Handles one already-terminated command (the ';' stripped). Kenwood CAT
+// convention, unlike Hamlib's rigctld: "set" commands normally get no
+// reply at all (fire-and-forget), only "get" queries (a bare command with
+// no parameter) reply - so unlike hamlib.c's handle_line(), most branches
+// below send nothing.
+static void cat_handle_command(char *cmd)
+{
+    size_t len = strlen(cmd);
+    if (len == 0) return;
+
+    // --- ID: get only - identify as a Kenwood TS-480 (ID code 020),
+    // matching the QRP Labs QMX's own choice for the same reason: FLRig
+    // (or anything else) will expect TS-480 behavior from every other
+    // command once it sees this. ---
+    if (len == 2 && strncmp(cmd, "ID", 2) == 0) {
+        cat_send("ID020;");
+        printf("cat: ID -> 020 (TS-480)\n");
+        return;
+    }
+
+    // --- FA: VFO A frequency, 11-digit Hz. Bare "FA" is a get; "FA<11
+    // digits>" is a set. ---
+    if (len >= 2 && cmd[0] == 'F' && cmd[1] == 'A') {
+        if (len == 2) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "FA%011d;", freq_hdr);
+            cat_send(buf);
+            printf("cat: FA -> %d Hz\n", freq_hdr);
+        } else {
+            long f = strtol(cmd + 2, NULL, 10);
+            if (f > 0) {
+                radio_tune_to((uint32_t)f);
+                printf("cat: FA%s -> tuned to %ld Hz\n", cmd + 2, f);
+            } else {
+                printf("cat: FA%s -> invalid frequency, ignored\n", cmd + 2);
+            }
+        }
+        return;
+    }
+
+    // --- FB: VFO B. minibitx has one VFO - mirror FA on get, accept and
+    // ignore on set, same "nothing else to switch to" stance Hamlib's V/
+    // chk_vfo already takes. ---
+    if (len >= 2 && cmd[0] == 'F' && cmd[1] == 'B') {
+        if (len == 2) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "FB%011d;", freq_hdr);
+            cat_send(buf);
+            printf("cat: FB -> %d Hz (single VFO, mirrors FA)\n", freq_hdr);
+        } else {
+            printf("cat: FB%s -> ok (single VFO, not applied)\n", cmd + 2);
+        }
+        return;
+    }
+
+    // --- TX / RX: bare, immediate, no reply (Kenwood convention) - same
+    // entry point and same "local CW key wins" guard as Hamlib's T. ---
+    if (len == 2 && strncmp(cmd, "TX", 2) == 0) {
+        if (cw_tx_active()) {
+            printf("cat: TX -> ignored, local CW key holds TX\n");
+        } else {
+            radio_set_tx(1);
+            printf("cat: TX -> TX on\n");
+        }
+        return;
+    }
+    if (len == 2 && strncmp(cmd, "RX", 2) == 0) {
+        if (cw_tx_active()) {
+            printf("cat: RX -> ignored, local CW key holds TX\n");
+        } else {
+            radio_set_tx(0);
+            printf("cat: RX -> TX off\n");
+        }
+        return;
+    }
+
+    // --- TQ: transmit state - "TQ;" is a get (replies), "TQ0;"/"TQ1;" is
+    // a set (no reply, same as TX/RX above - this is just another way to
+    // ask for the same thing). ---
+    if (len >= 2 && cmd[0] == 'T' && cmd[1] == 'Q') {
+        if (len == 2) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "TQ%d;", in_tx ? 1 : 0);
+            cat_send(buf);
+            printf("cat: TQ -> %s\n", in_tx ? "TX" : "RX");
+        } else {
+            int tx_on = (cmd[2] != '0');
+            if (cw_tx_active()) {
+                printf("cat: TQ%c -> ignored, local CW key holds TX\n", cmd[2]);
+            } else {
+                radio_set_tx(tx_on);
+                printf("cat: TQ%c -> %s\n", cmd[2], tx_on ? "TX on" : "TX off");
+            }
+        }
+        return;
+    }
+
+    // --- MD: mode - cosmetic only, see cat_current_mode's comment above. ---
+    if (len >= 2 && cmd[0] == 'M' && cmd[1] == 'D') {
+        if (len == 2) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "MD%s;", cat_current_mode);
+            cat_send(buf);
+            printf("cat: MD -> %s\n", cat_current_mode);
+        } else {
+            cat_current_mode[0] = cmd[2];
+            cat_current_mode[1] = '\0';
+            printf("cat: MD%c -> ok (cosmetic, not applied)\n", cmd[2]);
+        }
+        return;
+    }
+
+    // --- IF: combined status string - get only. Best-effort reconstruction
+    // of the classic Kenwood IF layout (11-digit freq, 5-char step/blank,
+    // 5-char signed RIT offset, RIT on/off, XIT on/off, memory bank,
+    // 2-digit memory channel, TX/RX, mode, VFO/memory, scan, split, tone
+    // status, 2-digit tone number, one reserved digit) with everything
+    // minibitx doesn't have (RIT/XIT/memory/scan/split/tone) reported as
+    // off/zero. NOTE: the exact field widths here are reconstructed from
+    // the general Kenwood IF convention, not confirmed character-for-
+    // character against QMX's own manual text (only a paraphrased summary
+    // of it was available while writing this) - if FLRig's status display
+    // looks wrong (frequency in the wrong place, mode misread) while FA/
+    // MD/TQ individually work fine, this is the first place to check,
+    // ideally against a packet capture of a real QMX's IF response.
+    if (len == 2 && strncmp(cmd, "IF", 2) == 0) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "IF%011d00000+0000000%02d%d%s00000000;",
+                 freq_hdr, 0 /* memory channel */, in_tx ? 1 : 0, cat_current_mode);
+        cat_send(buf);
+        printf("cat: IF -> sent (freq %d, %s, mode %s)\n",
+               freq_hdr, in_tx ? "TX" : "RX", cat_current_mode);
+        return;
+    }
+
+    // Unknown command - Kenwood radios generally stay silent on anything
+    // they don't recognize (no Hamlib-style "unknown command" reply
+    // convention exists here), so match that rather than invent one.
+    printf("cat: %s -> unrecognized, ignored\n", cmd);
+}
+
+// Puts the ACM tty into raw mode: no line discipline, no echo, one byte
+// read at a time (VMIN=1/VTIME=0). Without this, the kernel's tty layer
+// applies ordinary canonical-mode line editing/echo to what's actually a
+// binary-ish, semicolon-terminated protocol with no real newlines -
+// harmless-looking in a first read, but silently wrong, the same class of
+// "looks fine, isn't" bug as this file's 0-byte-vs-1-byte UDC unbind write
+// earlier in this project.
+static void cat_set_raw(int fd)
+{
+    struct termios tio;
+    if (tcgetattr(fd, &tio) < 0) return;
+    cfmakeraw(&tio);
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+    tcsetattr(fd, TCSANOW, &tio);
+}
+
+static void *cat_thread_fn(void *arg)
+{
+    (void)arg;
+    char buf[CAT_LINE_MAX];
+    size_t buf_len = 0;
+    unsigned open_backoff_ms = 10;
+
+    while (cat_running) {
+        if (cat_fd < 0) {
+            cat_fd = open(CAT_TTY_PATH, O_RDWR | O_NOCTTY);
+            if (cat_fd < 0) {
+                // Most commonly: the ACM gadget function isn't bound yet
+                // (or at all). Back off rather than spin - same lesson as
+                // this file's UAC2 writer-thread fix: an absent/not-yet-
+                // ready consumer/producer must not cost CPU forever.
+                struct timespec ts = { .tv_sec = open_backoff_ms / 1000,
+                                        .tv_nsec = (open_backoff_ms % 1000) * 1000000L };
+                nanosleep(&ts, NULL);
+                if (open_backoff_ms < CAT_OPEN_RETRY_MAX_MS)
+                    open_backoff_ms *= 2;
+                continue;
+            }
+            cat_set_raw(cat_fd);
+            open_backoff_ms = 10;   // reset now that it's open again
+            buf_len = 0;
+            printf("cat: %s opened\n", CAT_TTY_PATH);
+        }
+
+        char c;
+        ssize_t n = read(cat_fd, &c, 1);
+        if (n <= 0) {
+            // Device gone (gadget unbound/rebound, cable pulled) - close
+            // and let the top of the loop reopen it with backoff.
+            if (cat_running) printf("cat: %s closed, will retry\n", CAT_TTY_PATH);
+            close(cat_fd);
+            cat_fd = -1;
+            continue;
+        }
+
+        if (c == ';') {
+            buf[buf_len] = '\0';
+            cat_handle_command(buf);
+            buf_len = 0;
+        } else if (c != '\r' && c != '\n' && buf_len + 1 < sizeof(buf)) {
+            buf[buf_len++] = c;
+        }
+        // else: stray CR/LF between commands, or a line too long - drop it
+        // silently until the next ';'.
+    }
+
+    if (cat_fd >= 0) {
+        close(cat_fd);
+        cat_fd = -1;
+    }
+    return NULL;
+}
+
+int cat_init(void)
+{
+    cat_running = 1;
+    if (pthread_create(&cat_thread_tid, NULL, cat_thread_fn, NULL) != 0) {
+        fprintf(stderr, "cat: failed to start reader thread\n");
+        cat_running = 0;
+        return -1;
+    }
+    pthread_detach(cat_thread_tid);
+    printf("init: CAT (Kenwood TS-480 subset) listening on %s\n", CAT_TTY_PATH);
+    return 0;
+}
+
+void cat_stop(void)
+{
+    cat_running = 0;
+    if (cat_fd >= 0) {
+        // Unblock the reader thread's blocking read() - same idea as
+        // hamlib_stop() closing listen_fd to unblock accept().
+        close(cat_fd);
+        cat_fd = -1;
+    }
 }
