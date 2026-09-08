@@ -1,5 +1,11 @@
 /*
- * usb_gadget.h — USB Audio Class 2.0 (UAC2) IQ streamer for minibitx.
+ * usb_gadget.h — USB gadget composite device for minibitx: Audio Class 2.0
+ * (UAC2) IQ streaming plus a CDC-ACM serial function for Kenwood
+ * TS-480-subset CAT control. Both live in usb_gadget.c - the CAT command
+ * handling is in its own clearly-marked section near the bottom of that
+ * file, rather than a separate translation unit, since both functions are
+ * just two halves of the one composite gadget this file already owns the
+ * whole lifecycle of.
  *
  * Ported from the UAC2 section Mike (KB2ML) added to sbitx's hpsdr_p1.c.
  * That file also carried a much larger HPSDR Protocol 1 rewrite (half-band
@@ -13,16 +19,33 @@
  *
  * Provides a USB Audio Class 2.0 gadget device named "sBitx" that streams
  * 24-bit / 48 kHz stereo IQ (I = left, Q = right) to any SDR application
- * that can consume a USB audio input (e.g. SDR#, HDSDR, GQRX, SDR Console).
+ * that can consume a USB audio input (e.g. SDR#, HDSDR, GQRX, SDR Console),
+ * and — as of the second function added below — a CDC-ACM serial port
+ * alongside it that control-surface software (FLRig chief among them) can
+ * talk Kenwood-style CAT commands to, without needing any TCP-to-serial
+ * bridge on the host side.
  *
  * Architecture overview:
  *   The Linux USB gadget framework is configured via the configfs API under
- *   /sys/kernel/config/usb_gadget/. A UAC2 function is bound with:
- *     - bcdADC = 0x0200 (Audio Class 2.0)
- *     - one AudioStreaming interface: 2-ch, 24-bit PCM, 48000 Hz
- *     - device/product strings: "sBitx"
- *   Once the gadget is bound to a UDC controller (detected automatically),
- *   the host sees a standard USB audio capture device called "sBitx".
+ *   /sys/kernel/config/usb_gadget/. Two functions are bound into one
+ *   composite gadget, both created/torn down together by
+ *   uac_gadget_create()/uac_gadget_destroy() in usb_gadget.c. Beyond
+ *   configfs plumbing, the ACM side's only other logic is the CAT section
+ *   near the bottom of usb_gadget.c, which is what actually reads/writes
+ *   the resulting /dev/ttyGS0:
+ *     - uac2.0: bcdADC = 0x0200 (Audio Class 2.0), one AudioStreaming
+ *       interface, 2-ch, 24-bit PCM, 48000 Hz
+ *     - acm.usb0: a standard CDC-ACM serial function (f_acm) — essentially
+ *       no configurable attributes, just a directory to create
+ *   Device/product strings: "sBitx" / "sBitx IQ". Once the gadget is bound
+ *   to a UDC controller (detected automatically), the host sees a standard
+ *   USB audio capture device called "sBitx" AND a standard USB serial port.
+ *   Windows 10/11 auto-binds its inbox usbser.sys driver to the ACM
+ *   interface with no custom INF needed, the same "just works" story UAC2
+ *   already gets for audio class devices (both bench-confirmed
+ *   individually; running the two functions together in one composite
+ *   gadget is new as of this writing — see docs/usb_gadget_os_setup.md for
+ *   the current bench-testing status).
  *
  *   Sample delivery:
  *     Contrary to what this comment used to say - minibitx's audio thread
@@ -97,7 +120,7 @@
  *     configs/c.1/
  *       strings/0x409/configuration = "Default"
  *       bmAttributes, MaxPower
- *       function symlink -> functions/uac2.0/
+ *       function symlinks -> functions/uac2.0/, functions/acm.usb0/
  *     functions/uac2.0/
  *       c_srate  = 48000
  *       c_ssize  = 3        (3 bytes = 24-bit)
@@ -105,13 +128,15 @@
  *       p_srate  = 48000    (playback side, unused but must be set)
  *       p_ssize  = 3
  *       p_chmask = 3
+ *     functions/acm.usb0/
+ *       (no attributes set — port_num is read-only/assigned by the kernel)
  *
  * Dependencies (must be present on the target system):
  *   Kernel modules : dwc2 (or other device-mode UDC), libcomposite
  *   Userspace libs : libasound2-dev (ALSA — for PCM write to the
  *                    UAC2Gadget card; minibitx already links -lasound
  *                    for sound.c)
- *   Kernel config  : CONFIG_USB_CONFIGFS_F_UAC2=y
+ *   Kernel config  : CONFIG_USB_CONFIGFS_F_UAC2=y, CONFIG_USB_CONFIGFS_F_ACM=y
  *
  * Thread safety:
  *   uac_init()/uac_stop() are meant to be called once, from main(), around
@@ -128,11 +153,14 @@
 #ifndef USB_GADGET_H
 #define USB_GADGET_H
 
-/* Configure the UAC2 gadget via configfs and open the ALSA loopback PCM.
- * Call once, after hpsdr_init()/hpsdr_poll(). Returns 0 if both the gadget
- * and the PCM are ready, -1 if either step fails (e.g. no UDC, snd-aloop
- * not loaded) — not a hard failure for the rest of minibitx, which keeps
- * running over HPSDR/UDP either way. */
+/* Configure the composite UAC2+ACM gadget via configfs and open the UAC2
+ * side's ALSA PCM. Call once, after hpsdr_init()/hpsdr_poll(). Returns 0 if
+ * both the gadget and the PCM are ready, -1 if either step fails (e.g. no
+ * UDC found) — not a hard failure for the rest of minibitx, which keeps
+ * running over HPSDR/UDP either way. The ACM function comes up as part of
+ * the same gadget bind; cat_init() (below) is what actually opens and
+ * uses the resulting /dev/ttyGS0, independently of this succeeding or
+ * failing. */
 int uac_init(void);
 
 /* Deliver one 48 kHz IQ sample pair, normalized to [-1.0, +1.0]. Enqueues
@@ -150,5 +178,28 @@ void uac_stop(void);
 /* Returns 1 while the UAC2 stream is initialized and ready to accept
  * samples, 0 otherwise. */
 int uac_is_active(void);
+
+/* Kenwood TS-480-subset CAT control, reached over this gadget's CDC-ACM
+ * (ttyGS) serial function - see the "CAT control" section at the bottom
+ * of usb_gadget.c for the command set and implementation, and
+ * docs/04_remote_control_and_iq_output.md for why TS-480 specifically.
+ *
+ * This exists for control surfaces that only know how to talk CAT to a
+ * real (or real-enough) Kenwood radio - FLRig chief among them, since it
+ * has no generic "connect to a Hamlib rigctld-style server" option the
+ * way WSJT-X does. WSJT-X keeps using the existing Hamlib NET rigctl
+ * server (hamlib.c) unchanged; this is a second, independent control
+ * surface, not a replacement.
+ *
+ * Like uac_init(), this is best-effort: cat_init() failing (most commonly
+ * because the ACM gadget function isn't bound - no USB gadget support on
+ * this hardware/kernel, or the gadget failed to bind at all, see
+ * usb_gadget_os_setup.md) is not fatal. minibitx keeps running on
+ * whatever subset of control surfaces actually came up. Call after
+ * uac_init() (the two functions bind together as one gadget, but
+ * cat_init()/cat_stop() have no other dependency on uac_init() having
+ * succeeded). */
+int cat_init(void);
+void cat_stop(void);
 
 #endif /* USB_GADGET_H */
