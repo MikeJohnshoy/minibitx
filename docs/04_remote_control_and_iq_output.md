@@ -16,8 +16,12 @@ than poking GPIO or the si5351 directly — so adding a new control
 surface never means a second place that can put the hardware in an
 inconsistent state. Today there are two callers:
 
-- **Hamlib/rigctld** (`hamlib.c`) — the sole live frequency control
-  surface (`F`).
+- **Hamlib/rigctld** (`hamlib.c`) — a live frequency control surface
+  (`F`), primarily for WSJT-X and similar apps.
+- **Kenwood-CAT emulation over USB** (the CAT section of `usb_gadget.c`)
+  — a second, independent frequency/PTT control surface (`FA`), for
+  control apps like FLRig that can't speak Hamlib's rigctld protocol —
+  see below.
 - **HPSDR's inbound command parser** (`hpsdr_p1.c`) — calls
   `radio_set_tx()` only, for MOX/PTT (below).
 
@@ -49,6 +53,48 @@ since it's the one that knows which command triggered the change. This
 is minibitx's primary window into operational state once startup
 finishes; see
 [`05_process_and_threading_model.md`](05_process_and_threading_model.md).
+
+## Kenwood-CAT emulation over USB (for FLRig)
+
+`hamlib.c`'s rigctld server works fine for WSJT-X (it has a native
+"Hamlib NET rigctl" rig type), but FLRig has no such option — it only
+ever speaks CAT over a serial port to what it believes is a real radio.
+Rather than build FLRig a TCP-to-serial bridge (`com0com`/`com2tcp` on
+Windows, or similar), `usb_gadget.c` implements a second, independent
+control surface — in its own clearly-marked "Kenwood TS-480-subset CAT
+control" section near the bottom of that file, alongside the UAC2 code
+rather than a separate translation unit, since both are just two
+functions of the one composite gadget `usb_gadget.c` already owns —
+that answers as a Kenwood TS-480 over the USB gadget's own CDC-ACM
+serial function (see [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md)
+for the gadget composite-device details) — so FLRig just opens the COM
+port Windows assigns the gadget, no extra software involved. The TS-480
+subset was picked because it's exactly the CAT dialect the QRP Labs
+QMX/QMX+ already emulates for the same reason (old enough to be widely
+supported, and QMX has no genuine SSB TX either, so its command set
+already excludes modes minibitx can't produce).
+
+Implemented commands (Kenwood convention: "set" commands get no reply;
+only bare "get" queries do):
+
+| Command | Behavior |
+|---|---|
+| `ID` | get only — always replies `020` (the TS-480's ID code) |
+| `FA` / `FB` | get / set frequency, 11-digit Hz — `FA` calls `radio_tune_to()`; `FB` mirrors `FA` on get and is accepted-but-ignored on set (single VFO) |
+| `TX` / `RX` | bare, immediate PTT, no reply — calls `radio_set_tx()`, same "local CW key wins" guard as Hamlib's `T` |
+| `TQ` | get / set PTT (0/1) — another way to ask for the same thing as `TX`/`RX` |
+| `MD` | get / set mode — **cosmetic only**, same reasoning as Hamlib's `M`; defaults to `3` (CW), the one mode minibitx can actually transmit |
+| `IF` | get only — combined status string (frequency, TX/RX, mode); RIT/XIT/memory/scan/split/tone all reported as off/zero since minibitx has none of them |
+
+Anything else is silently ignored, matching real Kenwood radios rather
+than inventing an error reply convention that doesn't exist in the CAT
+protocol. Like every other control surface here, `cat_init()` failing
+(most commonly: no USB gadget support on this hardware/kernel, or the
+gadget failed to bind) is not fatal — minibitx keeps running on whatever
+subset of control surfaces actually came up.
+
+WSJT-X needs no changes and keeps using the Hamlib server above; this is
+purely additive.
 
 ## HPSDR Protocol 1 — inbound (control) and outbound (I/Q)
 
@@ -94,8 +140,8 @@ motivated getting this right. `hpsdr_p1.c` is unaffected - it still gets
 native 96kHz I/Q.
 
 Either stream works without the other: a client connected over USB audio
-alone, with no HPSDR app connected, still gets I/Q, and vice versa.
-Neither `uac_init()` nor `hamlib_init()` failing is treated as fatal at
-startup — minibitx keeps running on whatever subset of control/streaming
-surfaces came up successfully; see
+alone, with no HPSDR app connected, still gets I/Q, and vice versa. None
+of `uac_init()`, `cat_init()`, or `hamlib_init()` failing is treated as
+fatal at startup — minibitx keeps running on whatever subset of
+control/streaming surfaces came up successfully; see
 [`05_process_and_threading_model.md`](05_process_and_threading_model.md).
