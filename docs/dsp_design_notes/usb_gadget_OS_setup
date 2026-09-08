@@ -1,4 +1,4 @@
-# USB Gadget (UAC2) OS Setup — Raspberry Pi 4, USB-C Port
+# USB Gadget (UAC2 + CDC-ACM) OS Setup — Raspberry Pi 4, USB-C Port
 
 Status: §3-§11 are all bench-confirmed end-to-end on real hardware
 (2026-09, Pi 4, Raspberry Pi OS Trixie, Windows 11 host) - the gadget
@@ -7,7 +7,10 @@ with or without the USB-C cable attached; enumerates cleanly over a
 USB-A host port (§10); and WSJT-X now opens "sBitx IQ" directly and
 decodes FT8 correctly (§9, §11) - the last open question (whether audio
 data actually reached the host at all, not just correct enumeration) is
-resolved.
+resolved. §13 adds a second gadget function (CDC-ACM, for CAT control)
+alongside the UAC2 one covered everywhere else in this document - that
+combination is new as of this writing and **not yet bench-tested**; see
+§13 for what to check first.
 
 ## 1. Background
 
@@ -501,3 +504,76 @@ the next step would be `dmesg -w` spanning the boot itself (not just
 minibitx's later startup) to check whether `dwc2`'s probe logs a
 reset/connect event at the moment the toast appears - not pursued
 further as of this writing.
+
+## 13. Adding CDC-ACM for CAT control (FLRig) - untested combination, check this first
+
+As of this writing, `usb_gadget.c` creates a second function in the same
+gadget alongside `uac2.0`: `acm.usb0`, a standard CDC-ACM serial port,
+bound into the same `configs/c.1`. The CAT control section near the
+bottom of that same file (see
+[`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md))
+opens the resulting `/dev/ttyGS0` on the Pi side and answers Kenwood
+TS-480-subset CAT commands on it - the intended use is FLRig on Windows
+opening whatever COM port Windows assigns the gadget, with no bridge
+software of any kind.
+
+**Why this needs its own bench pass, not just an assumption that it
+inherits §9-§11's success:** every confirmation earlier in this document
+was of a single-function (UAC2-only) gadget. Two things are genuinely
+new with a second function present:
+
+- **Composite descriptor correctness.** Two functions in one
+  configuration means the kernel's gadget framework has to emit a
+  correct Interface Association Descriptor grouping for the ACM pair
+  (control + data interface) alongside UAC2's own interface(s), and
+  Windows has to walk that composite descriptor correctly to bind
+  *both* the audio class driver AND `usbser.sys` to their respective
+  interfaces. This is exactly the kind of thing that's fine on paper
+  (per the kernel gadget-testing docs and Microsoft's own `usbser.sys`
+  documentation, both consulted while building this) but is worth
+  seeing actually enumerate before trusting it - the UAC2-only case
+  took real bench iteration (§9, §11) to get right despite looking
+  correct at every earlier check too.
+- **No custom driver should be needed**, but confirm it: Windows 10/11
+  auto-binds the inbox `usbser.sys` driver to any interface presenting
+  standard `bInterfaceClass=0x02`/`bInterfaceSubClass=0x02` (CDC ACM),
+  the same "just works" story UAC2 already gets for audio class
+  devices - if Device Manager instead shows an unknown/unrecognized
+  device for the second interface, that's the first thing to check
+  (Device Manager's own descriptor view, or a USB analyzer, would show
+  whether the IAD grouping came out wrong).
+
+**What to check on the bench, in order:**
+
+1. Console log at startup should now read
+   `init: USB gadget bound to UDC '<name>' (UAC2 audio + ACM CAT)`
+   followed by `init: CAT (Kenwood TS-480 subset) listening on /dev/ttyGS0`
+   - both functions bound, both minibitx-side threads up.
+2. Windows Device Manager should show *both* a "sBitx IQ" audio device
+   (as before) and a new COM port under "Ports (COM & LPT)" - if only
+   one appears, that's the composite-descriptor question above.
+3. Confirm the UAC2 audio path still works exactly as it did before
+   this change (§9) - adding a function to the same gadget shouldn't
+   affect it, but this is the one place a subtle interaction (e.g. USB
+   bandwidth/endpoint numbering conflicts) would show up first.
+4. Open the new COM port in a plain terminal (PuTTY, etc.) at any baud
+   rate (CDC-ACM doesn't actually use the configured baud/framing for
+   anything - it's carried over USB, not a real UART) and send `ID;` -
+   expect `ID020;` back. Then `FA;` - expect the current frequency as
+   `FA<11 digits>;`.
+5. Only once 1-4 look right, try FLRig itself: set its rig to a
+   Kenwood TS-480, point it at the new COM port, any baud rate. Confirm
+   frequency reads correctly and `FA` from FLrig retunes minibitx.
+6. The `IF;` response format (used for FLRig's combined status
+   display) was reconstructed from the general Kenwood IF convention,
+   not confirmed character-for-character against the QMX's own manual
+   text - see the field-by-field comment on the `IF` handler in
+   `usb_gadget.c`'s CAT section. If
+   FLRig's status display looks wrong (frequency in the wrong place,
+   mode misread) while `FA`/`MD`/`TQ` individually work fine via the
+   terminal test in step 4, this is the first place to check - ideally
+   against a packet capture of a real QMX's `IF` response.
+
+None of this is a hard dependency for the UAC2/WSJT-X path already
+confirmed working (§9, §11) - `cat_init()` failing, or FLRig never being
+tested, doesn't affect audio streaming or Hamlib/WSJT-X control at all.
