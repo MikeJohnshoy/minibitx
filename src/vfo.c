@@ -1,22 +1,21 @@
-// Modified and extended to enable I and Q outputs for quadrature mixing
+// vfo.c
+//
 // derived from Farhan's original vfo.c
+// Modified and extended to enable I and Q outputs for quadrature mixing
 // The vfo_read() is preserved but vfo_read_iq() is now preferred.
 
 #include "vfo.h"
 #include <math.h>
 
 // we define one more lookup table entry than needed, so that each quadrant
-// has both endpoints of 90 degree range
+// has both endpoints of a 90 degree range
 static int phase_table[MAX_PHASE_COUNT];
+
 // Must match the real ADC capture rate (sound.c's SAMPLE_RATE) - this is
 // what vfo_start()'s phase-increment math uses to convert RX_IF_FREQ_HZ
-// into an actual NCO rate. 48000 here (down from sbitx's native 96000)
-// put Nyquist exactly on top of the fixed 24kHz IF, with zero headroom
-// for the crystal filter's passband - any real signal bandwidth around
-// that IF folded straight back onto itself, showing up as a mirror-
-// symmetric spectrum after mixing to baseband. 96000 restores the
-// headroom sbitx relies on for the same fixed IF.
+// into an actual NCO rate. 
 int sampling_freq = 96000;
+
 // the only time we call this trig function is when we initialize the table
 void vfo_init_phase_table() {
   for (int i = 0; i < MAX_PHASE_COUNT; i++) {
