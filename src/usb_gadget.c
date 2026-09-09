@@ -1,10 +1,4 @@
-/*
- * usb_gadget.c — see usb_gadget.h for scope and architecture.
- *
- * Ported near-verbatim from the UAC2 section of sbitx's hpsdr_p1.c
- * (Mike/KB2ML). No sBitx/GTK dependency in this file — only ALSA and
- * Linux configfs/sysfs — so the port was mechanical.
- */
+// usb_gadget.c — see usb_gadget.h for scope and architecture.
 
 #include "usb_gadget.h"
 
