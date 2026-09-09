@@ -39,7 +39,7 @@ goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_out
   ADC / wm8731 audio codec (sound.c, 96 kHz sample rate)
      |
      v
-  Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ, never swept
+  Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz), never swept
      |            sound.c: sound_process() calls vfo_read_iq() per sample
      v
   Baseband I/Q (centered at 0 Hz)
