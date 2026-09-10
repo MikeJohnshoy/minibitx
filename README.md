@@ -67,7 +67,7 @@ Produces a single `minibitx` binary from the sources in `src/`. Requires
 
 Brings up the radio hardware, starts the audio and network threads, and
 listens for control connections — a rigctld-compatible server on TCP
-4532, and an HPSDR Protocol 1 UDP listener. A composite USB gadget provides I&A data as audio and a CAT control interface.  Additional interfaces will be experimented with.
+4532, and an HPSDR Protocol 1 UDP listener. A composite USB gadget provides I&Q data as audio and a CAT control interface.  Additional interfaces will be experimented with.
 
 ## Documentation
 
