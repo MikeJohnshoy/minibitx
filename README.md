@@ -49,6 +49,11 @@ A secondary minibitx objective is to replace code dependent on deprecated librar
 
 minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external applications.
 
+TO DO: 
+0. complete removal of wiringPi (setting LPF, T/R and PTT)
+1. simple/efficient/low-overhead packet interface for IQ in and out
+2. study gain setting for A/D to use more of dynamic range
+
 ## Building
 
 ```
