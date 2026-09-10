@@ -66,9 +66,7 @@ Produces a single `minibitx` binary from the sources in `src/`. Requires
 
 Brings up the radio hardware, starts the audio and network threads, and
 listens for control connections — a rigctld-compatible server on TCP
-4532, and an HPSDR Protocol 1 UDP listener. Point your SDR app's HPSDR
-client at this Pi's IP, and (optionally) its CAT/rig control at
-`127.0.0.1:4532` with rig model "Hamlib NET rigctl" for live retuning.
+4532, and an HPSDR Protocol 1 UDP listener. A composite USB gadget provides I&A data as audio and a CAT control interface.  Additional interfaces will be experimented with.
 
 ## Documentation
 
