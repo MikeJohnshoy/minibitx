@@ -45,7 +45,7 @@ minibitx currently has the receive processing pipeline below in working order th
 ```
 A transmit processing pipeline also exists (just imagine the reverse of the process abovve), currently for CW transmission only.
 
-A secondary minibitx objective is to replace code dependent on outdated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.
+A secondary minibitx objective is to replace code dependent on deprecated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.  
 
 minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external applications.
 
