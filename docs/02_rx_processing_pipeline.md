@@ -21,34 +21,35 @@ goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_out
   Antenna
      |
      v
-  LPF bank (radio_hw.c: set_lpf_40mhz, one of 4 relays by band)
+  Low Pass Filter (LPF) bank (select one)
      |
      v
-  Mixer 1  <---  clk2, si5351 RX LO (SWEEPS with tuning)
-     |            radio.c: si5351bx_setfreq(2, f + bfo_freq - RX_IF_HZ)
+  Mixer 1  <---  clk2, si5351 RX LO (varies with tuning)
+     |            mixes received signal to center of crystal filter
      v
-  Crystal filter, fixed at bfo_freq (~40.0124 MHz, based on hardware spec review)
+  Crystal filter centered at ~40.0124 MHz, based on hardware spec 
      |
      v
-  Mixer 2  <---  clk1, si5351 BFO (FIXED, never swept, calculated to shift output
-     |           of mixer 1 to baseband) set on startup minibitx.c: si5351bx_setfreq(1, bfo_freq)
+  Mixer 2  <---  clk1, si5351 (FIXED, never varies, shifts output
+     |           of crystal filter to 24kHz baseband   
      v
-  Low IF, fixed at RX_IF_HZ (24000 Hz)
+  Low IF, centered at RX_IF_HZ (24000 Hz)
      |
      v
-  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate)
-     |
+  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is settable?
+     |  
      v
-  Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz), never swept
+  Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
      |            sound.c: sound_process() calls vfo_read_iq() per sample
-     v
+     v            converts real value A/D output to analytic I&Q at baseband
   Baseband I/Q (centered at 0 Hz)
      |
      v
   Anti-alias FIR (antialias.c, 21 taps, applied separately to I and Q)
      |
      v
-  handed to hpsdr_send_iq() and uac_push_iq() — see 04
+  handed to interface software (hpsdr_p1, USB audio out, or simple network
+            interface) to work with external applications
 ```
 
 Two mixer stages, two si5351 clocks, two different jobs.
