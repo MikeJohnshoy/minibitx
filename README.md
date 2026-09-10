@@ -8,8 +8,8 @@ Mature, highly developed external Software Defined Radio (SDR) applications are 
 Lessons learned in this project can be folded back into sbitx or used in other projects.
 
 minibitx currently has the receive processing pipeline below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely frozen in the sbitx hardware.
-..
 
+```
   Antenna
      |
      v
@@ -42,7 +42,7 @@ minibitx currently has the receive processing pipeline below in working order th
      v
   handed to interface software (hpsdr_p1, USB audio out, or simple network
             interface) to work with external applications
-..
+```
 
 A secondary minibitx objective is to replace code dependent on outdated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.
 
