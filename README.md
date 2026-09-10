@@ -7,7 +7,7 @@ minibitx can now be compiled and run on the Rpi-4 in the sbitx to demonstrate an
 Mature, highly developed external Software Defined Radio (SDR) applications are being used with minibitx to find the upper limit of the sbitx processing chain.
 Lessons learned in this project can be folded back into sbitx or used in other projects.
 
-minibitx currently has the receive processing pipeline below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely frozen in the sbitx hardware.
+minibitx currently has the receive processing pipeline shown below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely "baked into" the sbitx hardware.
 
 ```
   Antenna
@@ -47,7 +47,7 @@ A transmit processing pipeline also exists (just imagine the reverse of the proc
 
 A secondary minibitx objective is to replace code dependent on deprecated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.  
 
-minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external applications.
+minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external SDR applications.
 
 TO DO: 
 
