@@ -30,8 +30,8 @@ hardware, and runs stand-alone.
 Receive works: antenna to baseband I/Q, streamed over HPSDR and/or USB
 audio, remotely controlled by HPSDR Protocol 1 or tunable via rigctld. 
 
-Transmit does not yet: I am trying to get a CW waveform out to the antennal
-but it does not work yet.
+Transmit:  a simple CW waveform (with Blackman-Harris shaping) controlled
+from a straight key on the sbitx key input.
 
 ## How the rest of these docs are organized
 
