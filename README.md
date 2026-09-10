@@ -29,8 +29,8 @@ minibitx currently has the receive processing pipeline below in working order th
      |
      v
   ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is settable?
-     |  
-     v
+     |            need to examine how this gain setting affects dynamic range
+     v            (used as IF gain in sbitx?)
   Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
      |            sound.c: sound_process() calls vfo_read_iq() per sample
      v            converts real value A/D output to analytic I&Q at baseband
