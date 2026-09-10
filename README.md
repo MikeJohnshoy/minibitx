@@ -1,23 +1,50 @@
 # minibitx — an experimental test bed
 
-This code allows sbitx hardware to be used by SDR software like
-SDRConsole or Quisk, without having the full sBitx application running.  minibitx runs
-on the Raspberry Pi board inside your sbitx in place of
-the sbitx software. It has no dependency on the sbitx software and expects to run stand-alone.  
+minibitx is a project to experiment with software from the sbitx codebase. 
+The 'mini' in minibitx means we're assembling the minimal set of code necessary to configure and operate the sbitx hardware with the best performance possible.
+Code for each required function has been pulled from the sbitx baseline and added to minibitx.
+minibitx can now be compiled and run on the Rpi-4 in the sbitx to demonstrate and test performance.
+Mature, highly developed external Software Defined Radio (SDR) applications are being used with minibitx to find the upper limit of the sbitx processing chain.
+Lessons learned in this project can be folded back into sbitx or used in other projects.
 
-minibitx supports connecting to the sbitx hardware via HPSDR Protocol 1 and/or USB
-audio.  It also supports a small set of HAMLIB/rigctl commands.
-It provides no user interface of its own beyond the console
-status display.  The external SDR application must supply all of the
-receive/transmit signal processing: spectrum and waterfall, demodulation, filtering, and
-audio routing. minibitx started as a trimmed-down and more modular version of the much larger sbitx
-codebase, keeping only the minimum needed for an external SDR app to work with the
-hardware.  
+minibitx currently has the receive processing pipeline below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely frozen in the sbitx hardware.
 
-STATUS: sbitx hardware initialized execept for INA260 and forward/reflected power measurement.
-Network connection using HPSDR Protocol 1 or USB audio gadget works
-Receive functions are working with external SDR programs (SDRConsole, Quisk, WSJTX. ...)
-CW transmit working. 
+  Antenna
+     |
+     v
+  Low Pass Filter (LPF) bank (select one)
+     |
+     v
+  Mixer 1  <---  clk2, si5351 RX LO (varies with tuning)
+     |            mixes received signal to center of crystal filter
+     v
+  Crystal filter centered at ~40.0124 MHz, based on hardware spec 
+     |
+     v
+  Mixer 2  <---  clk1, si5351 (FIXED, never varies, shifts output
+     |           of crystal filter to 24kHz baseband   
+     v
+  Low IF, centered at RX_IF_HZ (24000 Hz)
+     |
+     v
+  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is settable?
+     |  
+     v
+  Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
+     |            sound.c: sound_process() calls vfo_read_iq() per sample
+     v            converts real value A/D output to analytic I&Q at baseband
+  Baseband I/Q (centered at 0 Hz)
+     |
+     v
+  Anti-alias FIR (antialias.c, 21 taps, applied separately to I and Q)
+     |
+     v
+  handed to interface software (hpsdr_p1, USB audio out, or simple network
+            interface) to work with external applications
+
+A secondary minibitx objective is to replace code dependent on outdated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.
+
+minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external applications.
 
 ## Building
 
