@@ -1,8 +1,9 @@
 // minibitx.c
 //
-// Initializes the sbitx radio hardware, and allows 
-// a remote SDR application to control its operation over the network using
-// a subset of openHPSDR Protocol 1,HAMLIB / rigctl, or via a composite USB gadget.
+// Initializes the sbitx radio hardware, and allows a remote 
+// SDR application to control its operation over the network using
+// a subset of openHPSDR Protocol 1, HAMLIB / rigctl, or via a 
+// composite USB gadget.
 
 #include "hpsdr_p1.h"
 #include "si5351.h"
@@ -25,16 +26,14 @@
 // on the normal main-thread stack, not signal context) does the actual
 // teardown once it notices.
 static volatile sig_atomic_t shutdown_requested = 0;
-
 static void handle_shutdown_signal(int sig) {
   (void)sig;
   shutdown_requested = 1;
 }
 
-// Every hardware/subsystem init step below reports its own result with a
-// consistent "init: ..." line (see docs/01_hardware_init_and_control.md),
-// ending in the "radio hardware initialization complete" line. After initialization.
-// operational state is reported as it's processed
+// Every hardware/subsystem init step below reports its own 
+// result with a consistent "init: ..." line, ending in the 
+// "radio hardware initialization complete" line
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -53,9 +52,7 @@ int main(int argc, char **argv) {
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
-  // Board-specific calibration (currently just bfo_freq) lives in
-  // data/hw_settings.ini, not in source - the crystal filter center
-  // varies radio to radio. Load it before anything below uses bfo_freq.
+  // board-specific calibration lives in data/hw_settings.ini, not in source
   hw_settings_load();
 
   // Initialize wiringPi and put all GPIO lines (LPF relays, TX_LINE,
