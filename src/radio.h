@@ -8,7 +8,11 @@
 
 extern int freq_hdr;    // current frequency, Hz
 extern int in_tx;       // 0 = RX, 1 = TX
-extern int bfo_freq;    // center frequency of the crystal filter, Hz
+extern int xtal_filter_center; // measured true center of the crystal
+                                // filter, Hz - see radio.c
+extern int bfo_freq;    // real clk1/BFO frequency used only while
+                         // transmitting - deliberately NOT
+                         // xtal_filter_center; see radio.c
 extern struct vfo lo;   // software LO for RX quadrature mixing
 
 #define RX_IF_FREQ_HZ 24000
