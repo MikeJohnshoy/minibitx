@@ -35,18 +35,19 @@ for RX — same hardware, signal flowing the opposite direction:
           left=sidetone           left channel never reaches the PA)
      |
      v
-  Mixer 2  <---  clk1, si5351 BFO (FIXED - same clock RX uses)
+  Mixer 2  <---  clk1, si5351 (same physical clock RX uses, retuned to
+     |           bfo_freq for the duration of TX - see below)
      |           balanced modulator: ~23.3kHz carrier mixed onto bfo_freq -
      |           BFO sits at the filter's edge, not its center, so only
      |           the difference product lands in the passband (see below)
      v
-  Crystal filter, fixed at ~bfo_freq  (same filter RX uses)
+  Crystal filter, fixed at ~xtal_filter_center  (same filter RX uses)
      |
      v
-  Mixer 1  <---  clk2, si5351 RX/TX LO (radio_tune_to(), same clock as RX,
-     |           frequency corrected by +CW_PITCH_HZ for the duration of TX)
-     |           radio.c: si5351bx_setfreq(2, f + bfo_freq - RX_IF_FREQ_HZ
-     |                                        + CW_PITCH_HZ)  [TX only]
+  Mixer 1  <---  clk2, si5351 RX/TX LO (radio_tx_apply() retunes it for
+     |           TX; radio_tune_to() itself has no notion of TX at all)
+     |           radio.c: si5351bx_setfreq(2, freq_hdr + xtal_filter_center
+     |                                        - CW_PITCH_HZ)  [TX only]
      v
   PA  (gain fixed by hardware; drive level set upstream - see below)
      |
@@ -67,7 +68,8 @@ not repeated here).
 ## Stage by stage
 
 Following one CW keydown at 7,020,000 Hz (`bfo_freq` at its compiled
-default, 40,035,000 Hz) as a worked example.
+default, 40,035,000 Hz; `xtal_filter_center` at its compiled default,
+40,012,400 Hz) as a worked example.
 
 **Baseband CW waveform — two oscillators, one envelope.** `cw.c` runs
 two software NCOs (`vfo.c`) sharing a single table-driven attack/decay
@@ -99,26 +101,38 @@ regardless of its amplitude). The right channel's amplitude is the one
 place in the whole chain that sets how much power eventually reaches
 the antenna — everything after this point is fixed analog gain.
 
-**Mixer 2 — the BFO (clk1), same fixed clock RX uses, deliberately
-placed at the filter's edge.** The DAC's analog output drives a
-balanced modulator that mixes the ~23.3 kHz TX carrier onto `bfo_freq`,
-producing two products: `bfo_freq` − 23.3kHz (≈ 40,011,700 Hz) and
-`bfo_freq` + 23.3kHz (≈ 40,058,300 Hz). There's no phasing network or
-Hilbert-transform stage here — this hardware has a single real balanced
-modulator (confirmed against the schematic), and a real signal times a
-real LO always produces both sum and difference, no way around it. What
-makes this come out single-sideband anyway is *where* `bfo_freq` sits:
-40,035,000 Hz is not the crystal filter's center — it's deliberately
-~22.6 kHz above it, the same "BFO at the filter's edge" placement real
-sbitx's own design article describes (VU2ESE, "The sBitx": clock 1 sits
-~25 kHz above the filter's passband center for this exact reason). With
-the BFO off-center like this, the *difference* product lands right at
-the filter's real center (deep in the passband) while the *sum* product
-lands far into the stopband — see "Crystal filter" below. Before this,
-`cw.c` fed a bare 700 Hz tone straight into this same mixer, so both
-products (`bfo_freq` ± 700 Hz) landed within ~5-6 kHz of each other, far
-too close together for this filter to tell apart — see "Known
-limitations" for how that showed up on the air.
+**Mixer 2 — clk1, retuned to the BFO (`bfo_freq`) only while
+transmitting, deliberately placed at the filter's edge.** RX and TX
+used to be forced to share one single `clk1` value for the whole
+process; they now each have their own, and `radio_tx_apply()` (`radio.c`)
+retunes `clk1` from its RX value (`xtal_filter_center + RX_IF_FREQ_HZ`)
+to `bfo_freq` right before asserting PTT, and restores the RX value the
+moment TX ends — see
+[`02_rx_processing_pipeline.md`](02_rx_processing_pipeline.md)'s "Mixer
+2" section for the RX side of this. While transmitting, the DAC's
+analog output drives a balanced modulator that mixes the ~23.3 kHz TX
+carrier onto `bfo_freq`, producing two products: `bfo_freq` − 23.3kHz
+(≈ 40,011,700 Hz) and `bfo_freq` + 23.3kHz (≈ 40,058,300 Hz). There's no
+phasing network or Hilbert-transform stage here — this hardware has a
+single real balanced modulator (confirmed against the schematic), and a
+real signal times a real LO always produces both sum and difference, no
+way around it. What makes this come out single-sideband anyway is
+*where* `bfo_freq` sits: 40,035,000 Hz is not the crystal filter's
+center (`xtal_filter_center`, 40,012,400 Hz by default) — it's
+deliberately ~22.6 kHz above it (`TX_IF_OFFSET_HZ`, `cw.c`), the same
+"BFO at the filter's edge" placement real sbitx's own design article
+describes (VU2ESE, "The sBitx": clock 1 sits ~25 kHz above the filter's
+passband center for this exact reason). With the BFO off-center like
+this, the *difference* product lands almost exactly at the filter's
+real center - actually `CW_PITCH_HZ` (700 Hz) short of it, a small, real
+residual baked into how `TX_IF_OFFSET_HZ` was originally bench-derived
+(see its comment in `cw.c`), not an oversight - deep in the passband
+either way, while the *sum* product lands far into the stopband — see
+"Crystal filter" below. Before this, `cw.c` fed a bare 700 Hz tone
+straight into this same mixer, so both products (`bfo_freq` ± 700 Hz)
+landed within ~5-6 kHz of each other, far too close together for this
+filter to tell apart — see "Known limitations" for how that showed up on
+the air.
 
 **Crystal filter.** The same fixed bandpass RX uses, measured (see
 [`dsp_design_notes/antialias_filter_design.md`](dsp_design_notes/antialias_filter_design.md))
@@ -137,21 +151,26 @@ work: both of its products landed only ~5-6 kHz from `bfo_freq`, nowhere
 near this filter's edge, so neither one got meaningfully rejected.
 
 **Mixer 1 — the RX/TX LO (clk2), same clock `radio_tune_to()` sets for
-RX, corrected while transmitting.** `radio_tune_to()` itself still
-computes `f + bfo_freq - RX_IF_FREQ_HZ` identically for RX and TX — it
-has no notion of TX at all, and must not: it's also what drives the RX
-baseband NCO (`vfo_start(&lo, RX_IF_FREQ_HZ, ...)`), which has no pitch
-offset to correct for in the first place (see "Known limitations"). The
-correction lives one level up, in `radio.c`'s `radio_tx_apply()` — the
-single place all TX (straight key via `cw.c`, and remote MOX via
-`hpsdr_p1.c`) actually engages hardware — which re-issues clk2 with an
-extra `+ CW_PITCH_HZ` right before asserting PTT, and restores the plain
-formula right after dropping the relay. For our example: RX/idle clk2 =
-`7,020,000 + 40,035,000 - 24,000 = 47,031,000 Hz`; while keyed, clk2 =
-`47,031,700 Hz`. Mixing the crystal filter's output back down against
-this (now TX-corrected) LO is what actually determines the transmitted
-RF frequency — see "Known limitations" for the gap this closes and why
-it was needed.
+RX, retuned by `radio_tx_apply()` while transmitting.** `radio_tune_to()`
+itself only ever computes `f + xtal_filter_center` — it has no notion of
+TX at all, and must not: it's also what drives the RX baseband NCO
+(`vfo_start(&lo, RX_IF_FREQ_HZ, ...)`), which has no pitch offset to
+correct for in the first place (see "Known limitations"). The TX-only
+value lives one level up, in `radio.c`'s `radio_tx_apply()` — the single
+place all TX (straight key via `cw.c`, and remote MOX via `hpsdr_p1.c`)
+actually engages hardware — which re-issues clk2 as
+`freq_hdr + xtal_filter_center - CW_PITCH_HZ` right before asserting
+PTT (alongside retuning clk1 to `bfo_freq` - see "Mixer 2" above), and
+restores the plain RX formula right after dropping the relay. For our
+example: RX/idle clk2 = `7,020,000 + 40,012,400 = 47,032,400 Hz`; while
+keyed, clk2 = `7,020,000 + 40,012,400 - 700 = 47,031,700 Hz` - the same
+TX clk2 value the pipeline has always produced (verified algebraically
+identical to the older `f + bfo_freq - RX_IF_FREQ_HZ + CW_PITCH_HZ`
+formula for today's constants; only the RX-side value changed - see
+[`dsp_design_notes/antialias_filter_design.md`](dsp_design_notes/antialias_filter_design.md)
+§3). Mixing the crystal filter's output back down against this LO is
+what actually determines the transmitted RF frequency — see "Known
+limitations" for the dial-accuracy story this is part of.
 
 **PA.** A fixed-gain analog power amplifier stage. minibitx has no
 digital gain control over the PA itself — `radio_set_tx()`
@@ -264,16 +283,27 @@ never anything hardware-facing:
   HPSDR/USB carries no pitch offset of its own — `radio_tune_to()`'s
   formula puts RX exactly on the dial. TX was the one side that was
   off, by `CW_PITCH_HZ` (700 Hz) low, because `cw.c`'s TX carrier sits
-  at `CW_PITCH_HZ + TX_IF_OFFSET_HZ` rather than at `RX_IF_FREQ_HZ` (see
-  "Mixer 1" above for the derivation) — bench-confirmed on the air as
-  transmitting at dial − 700 Hz. Fixed by correcting clk2 by
-  `+ CW_PITCH_HZ` for the duration of TX only (`radio_tx_apply()` in
+  at `CW_PITCH_HZ + TX_IF_OFFSET_HZ` rather than at `xtal_filter_center`
+  (see "Mixer 2" above - the difference product lands `CW_PITCH_HZ`
+  short of true center) — bench-confirmed on the air as transmitting at
+  dial − 700 Hz. Fixed by computing clk2 during TX as
+  `freq_hdr + xtal_filter_center - CW_PITCH_HZ` (`radio_tx_apply()` in
   `radio.c`), the mirror of real sbitx's own `rx_pitch` correction,
   applied at the one place all TX funnels through rather than inside
   `radio_tune_to()` (which must stay TX-agnostic, since it also drives
-  the RX baseband NCO). Confirmed on the air with an independent remote
-  receiver: keyed down at a known dial frequency (`freq_hdr`), and the
-  transmitted signal now lands exactly on it — no residual 700 Hz
-  offset. Re-verify after any change to `bfo_freq`, `TX_IF_OFFSET_HZ`,
-  or `RX_IF_FREQ_HZ`, since the correction's value (`CW_PITCH_HZ`) was
-  derived from today's specific combination of those three constants.
+  the RX baseband NCO). Originally implemented as a `+ CW_PITCH_HZ`
+  correction on top of the plain RX formula
+  (`f + bfo_freq - RX_IF_FREQ_HZ`); re-derived in terms of
+  `xtal_filter_center` when RX and TX stopped sharing a single `clk1`
+  value (see
+  [`dsp_design_notes/antialias_filter_design.md`](dsp_design_notes/antialias_filter_design.md)
+  §3) - algebraically identical to the old formula for today's
+  constants (verified: both give clk2 = 47,031,700 Hz for the 7.02 MHz
+  worked example above), so the original on-air confirmation (keyed
+  down at a known dial frequency with an independent remote receiver,
+  landing exactly on it, no residual 700 Hz offset) should still hold,
+  but re-verifying it on air after this change is still worth doing
+  before trusting it, same as any change that touches TX. Re-verify
+  again after any future change to `bfo_freq`, `TX_IF_OFFSET_HZ`,
+  `xtal_filter_center`, or `CW_PITCH_HZ`, since this formula depends on
+  all four.
