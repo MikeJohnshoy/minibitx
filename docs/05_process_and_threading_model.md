@@ -32,11 +32,11 @@ Status: stub.
   gadget's configfs tree bound to a dead process) and for the
   independent self-healing fix that still covers `SIGKILL`/a crash,
   neither of which this handler can catch.
-- Console reporting: no periodic status line any more.
-  `status_print()` (`status.c`) still exists but isn't called from
-  anywhere - it used to be a single call right after the init-complete
-  line, removed since ongoing operational visibility already comes from
-  the `rigctl:`/`hpsdr:` command echoes described in
+- Console reporting: no periodic status line. `status.c`/`status.h` (a
+  single-line, redraw-in-place frequency/TX-RX display, once called
+  right after the init-complete line) were removed entirely - ongoing
+  operational visibility comes from the `rigctl:`/`hpsdr:` command
+  echoes described in
   [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md),
   which report a freq/PTT change at the moment it happens rather than a
   point-in-time snapshot.
