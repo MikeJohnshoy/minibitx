@@ -1,9 +1,8 @@
 // minibitx.c
 //
-// Initializes the sbitx radio hardware, and allows a remote 
-// SDR application to control its operation over the network using
-// a subset of openHPSDR Protocol 1, HAMLIB / rigctl, or via a 
-// composite USB gadget.
+// A tiny application that initializes the sbitx radio hardware, and allows 
+// a remote SDR application to control its operation over the network using
+// a subset of openHPSDR Protocol 1 and/or HAMLIB / rigctl.
 
 #include "hpsdr_p1.h"
 #include "si5351.h"
@@ -22,18 +21,29 @@
 // Standard rigctld TCP port
 #define HAMLIB_PORT 4532
 
-// Graceful shutdown: The handler only sets a flag, the idle loop below (running
+// Graceful shutdown: Ctrl+C (SIGINT) or a service manager's SIGTERM used to
+// take the default action - the process died on the spot, skipping every
+// _stop() function below entirely. That's exactly what left the USB
+// gadget's configfs tree bound to a dead process on the next start (see
+// docs/usb_gadget_os_setup.md §8 - fixed there too, independently, as a
+// self-healing backstop against this same state arising from a crash or
+// SIGKILL, which can't be caught here), and could in principle leave
+// PTT/the T/R relay stuck asserted if Ctrl+C landed while the key was
+// down. The handler only sets a flag - it must stay async-signal-safe,
+// so no printf/pthread/ALSA calls here - and the idle loop below (running
 // on the normal main-thread stack, not signal context) does the actual
 // teardown once it notices.
 static volatile sig_atomic_t shutdown_requested = 0;
+
 static void handle_shutdown_signal(int sig) {
   (void)sig;
   shutdown_requested = 1;
 }
 
-// Every hardware/subsystem init step below reports its own 
-// result with a consistent "init: ..." line, ending in the 
-// "radio hardware initialization complete" line
+// Every hardware/subsystem init step below reports its own result with a
+// consistent "init: ..." line (see docs/01_hardware_init_and_control.md),
+// ending in the "radio hardware initialization complete" line. After initialization.
+// operational state is reported as it's processed
 int main(int argc, char **argv) {
   (void)argc;
   (void)argv;
@@ -52,13 +62,16 @@ int main(int argc, char **argv) {
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
-  // board-specific calibration lives in data/hw_settings.ini, not in source
+  // Board-specific calibration (currently just bfo_freq) lives in
+  // data/hw_settings.ini, not in source - the crystal filter center
+  // varies radio to radio. Load it before anything below uses bfo_freq.
   hw_settings_load();
 
-  // Initialize wiringPi and put all GPIO lines (LPF relays, TX_LINE,
-  // TX_POWER, EXT_PTT) into their idle state.
+  // Claim all GPIO lines (LPF relays, TX_LINE, TX_POWER, EXT_PTT, CW_KEY)
+  // via the kernel's GPIO character-device API (src/gpio.c) and put the
+  // outputs into their idle state.
   if (radio_hw_gpio_init() < 0) {
-    fprintf(stderr, "init: GPIO/wiringPi setup failed\n");
+    fprintf(stderr, "init: GPIO setup failed\n");
     return -1;
   }
   printf("init: GPIO configured, T/R relay and PTT held low (RX-safe state)\n");
