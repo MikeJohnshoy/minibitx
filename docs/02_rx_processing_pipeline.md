@@ -25,13 +25,16 @@ goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_out
      |
      v
   Mixer 1  <---  clk2, si5351 RX LO (varies with tuning)
-     |            mixes received signal to center of crystal filter
+     |            mixes received signal to xtal_filter_center - the
+     |            crystal filter's own real, measured center
      v
   Crystal filter centered at ~40.0124 MHz, based on hardware spec 
      |
      v
-  Mixer 2  <---  clk1, si5351 (FIXED, never varies, shifts output
-     |           of crystal filter to 24kHz baseband   
+  Mixer 2  <---  clk1, si5351 (fixed while receiving - xtal_filter_center
+     |           + RX_IF_FREQ_HZ; switches to bfo_freq only for the
+     |           duration of TX - see 03_tx_processing_pipeline.md),
+     |           shifts output of crystal filter to 24kHz baseband
      v
   Low IF, centered at RX_IF_HZ (24000 Hz)
      |
@@ -67,16 +70,21 @@ si5351 clock. (Full relay init/idle-state details are in
 [`01_hardware_init_and_control.md`](01_hardware_init_and_control.md).)
 
 **Mixer 1 — the RX LO (clk2), which sweeps with tuning.** This is the
-only clock that moves when you retune. `radio_tune_to(f)` in `radio.c`
-sets it with `si5351bx_setfreq(2, f + bfo_freq - RX_IF_HZ)` — mixing the
-desired RF frequency `f` up to a fixed intermediate frequency at
-`bfo_freq` (40,012,400 Hz). Whatever `f` you tune to, the output of this
-stage always lands at the same fixed IF; that's the whole point of a
-superheterodyne front end, and it's also *why* nothing downstream of
-this stage needs to know the current operating frequency.
+only clock `radio_tune_to()` itself ever moves. `radio_tune_to(f)` in
+`radio.c` sets it with `si5351bx_setfreq(2, f + xtal_filter_center)` —
+mixing the desired RF frequency `f` up to `xtal_filter_center`, the
+crystal filter's own real, measured passband center (a board-specific
+calibration value, default 40,012,400 Hz - see
+[`dsp_design_notes/antialias_filter_design.md`](dsp_design_notes/antialias_filter_design.md)
+§3 for where that number comes from and why RX gets to aim at it
+directly rather than sharing a value with TX). Whatever `f` you tune
+to, the output of this stage always lands at that same fixed point;
+that's the whole point of a superheterodyne front end, and it's also
+*why* nothing downstream of this stage needs to know the current
+operating frequency.
 
-For our example cw signal at 7030000, 
-clk2 = 7,030,000 + 40,012,400 - 24,000 = 47,018,400 Hz
+For our example cw signal at 7030000,
+clk2 = 7,030,000 + 40,012,400 = 47,042,400 Hz
 
 **Crystal filter.** A fixed bandpass filter centered at `bfo_freq`. This
 is the receiver's actual selectivity — everything outside its passband
@@ -87,16 +95,22 @@ the IQ it receives. (Measured filter response and a proposed digital
 anti-alias filter to complement it live in
 [`dsp_design_notes/`](dsp_design_notes/).)
 
-**Mixer 2 — the BFO (clk1), which is fixed and started once.** This
-mixer brings the crystal-filter output (centered at 40,012,400) down to a
-low IF of `RX_IF_HZ` (24000 Hz) that the audio codec can actually
-sample. Its LO is si5351 `clk1`, set once in `minibitx.c` at startup —
-`si5351bx_setfreq(1, bfo_freq)` — and never touched again for the life
-of the process. It does not sweep. It cannot sweep: it's fixed at
-`bfo_freq` regardless of what frequency you're tuned to, because Mixer 1
-already did the job of bringing the *desired* signal to that same fixed
-`bfo_freq` point — Mixer 2 only has to undo the fixed offset, not track
-the tuning.
+**Mixer 2 — clk1, fixed while receiving.** This mixer brings the
+crystal-filter output (centered at `xtal_filter_center`) down to a low
+IF of `RX_IF_HZ` (24000 Hz) that the audio codec can actually sample.
+Its LO is si5351 `clk1`, set to `xtal_filter_center + RX_IF_FREQ_HZ`
+(40,036,400 Hz by default) in `minibitx.c` at startup, and restored to
+that same value every time RX resumes after a TX burst
+(`radio_tx_apply()`, `radio.c`) — it does not sweep with tuning for the
+same reason Mixer 1's output doesn't need to: whatever `f` you're tuned
+to, Mixer 1 already brought it to the same fixed `xtal_filter_center`
+point, so Mixer 2 only ever has to undo that one fixed offset. It is,
+however, *not* fixed for the entire life of the process any more: while
+transmitting, `radio_tx_apply()` retunes it to `bfo_freq` instead - a
+deliberately different, off-center value used only for CW image
+suppression - and restores this RX value the moment TX ends. See
+[`03_tx_processing_pipeline.md`](03_tx_processing_pipeline.md) for why
+TX needs its own value here rather than reusing this one.
 
 **ADC / audio codec.** `sound.c` reads from the already-open ALSA capture
 device (opened and configured per
@@ -145,8 +159,13 @@ for `hpsdr_send_iq()` and `uac_push_iq()`.
 `radio_tune_to(f)` in `radio.c` is the only function that changes what RF
 frequency the receiver is listening to, and it only ever touches two
 things: `clk2` (Mixer 1's LO) and the LPF bank. It does **not** touch
-`clk1` (the BFO) and does **not** change the software VFO's frequency —
-both stay fixed at their respective constants (`bfo_freq`, `RX_IF_HZ`)
-for the life of the process. Who's allowed to call `radio_tune_to()`,
-and how, is covered in
+`clk1` and does **not** change the software VFO's frequency — the
+software VFO stays fixed at `RX_IF_HZ` for the life of the process, and
+`radio_tune_to()` itself never moves `clk1` either way (it has no notion
+of TX at all - see [`03_tx_processing_pipeline.md`](03_tx_processing_pipeline.md)
+for the one place `clk1` *does* move, `radio_tx_apply()`, and why that
+lives there instead of here). As long as no TX burst is in progress,
+`clk1` sits at its RX value (`xtal_filter_center + RX_IF_FREQ_HZ`) and
+`radio_tune_to()` alone is enough to retune the receiver. Who's allowed
+to call `radio_tune_to()`, and how, is covered in
 [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md).
