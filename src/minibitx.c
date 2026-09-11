@@ -1,8 +1,8 @@
 // minibitx.c
 //
-// A tiny application that initializes the sbitx radio hardware, and allows 
+// Initializes the sbitx radio hardware, and allows 
 // a remote SDR application to control its operation over the network using
-// a subset of openHPSDR Protocol 1 and/or HAMLIB / rigctl.
+// a subset of openHPSDR Protocol 1,HAMLIB / rigctl, or via a composite USB gadget.
 
 #include "hpsdr_p1.h"
 #include "si5351.h"
@@ -21,16 +21,7 @@
 // Standard rigctld TCP port
 #define HAMLIB_PORT 4532
 
-// Graceful shutdown: Ctrl+C (SIGINT) or a service manager's SIGTERM used to
-// take the default action - the process died on the spot, skipping every
-// _stop() function below entirely. That's exactly what left the USB
-// gadget's configfs tree bound to a dead process on the next start (see
-// docs/usb_gadget_os_setup.md §8 - fixed there too, independently, as a
-// self-healing backstop against this same state arising from a crash or
-// SIGKILL, which can't be caught here), and could in principle leave
-// PTT/the T/R relay stuck asserted if Ctrl+C landed while the key was
-// down. The handler only sets a flag - it must stay async-signal-safe,
-// so no printf/pthread/ALSA calls here - and the idle loop below (running
+// Graceful shutdown: The handler only sets a flag, the idle loop below (running
 // on the normal main-thread stack, not signal context) does the actual
 // teardown once it notices.
 static volatile sig_atomic_t shutdown_requested = 0;
