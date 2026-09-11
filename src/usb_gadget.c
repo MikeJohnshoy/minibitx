@@ -789,6 +789,33 @@ static void cat_send(const char *s)
 // reply at all (fire-and-forget), only "get" queries (a bare command with
 // no parameter) reply - so unlike hamlib.c's handle_line(), most branches
 // below send nothing.
+// FLRig (unlike Hamlib clients such as WSJT-X) has no async push
+// mechanism for rig status - it has to actively poll every "get" query
+// (FA, FB, MD, ...) on every cycle just to keep its own display current,
+// bench-confirmed (2026-09) at several times a second, regardless of
+// whether anything actually changed. Logging every one of those floods
+// the console with near-identical repeated lines and drowns out
+// anything actually worth seeing - the same "don't log unchanged,
+// routine state" lesson already applied to uac_writer_thread's backoff
+// logging (usb_gadget.c) and hpsdr_p1.c's IQ pacer thread.
+//
+// Fix: a get's console line only prints when the reply actually differs
+// from the last reply of the SAME kind - compared as the exact bytes
+// sent back, so it covers a frequency change, a mode change, a PTT
+// change, etc. uniformly without tracking each field separately. Pass a
+// `static char[]` local to each call site (its value persists across
+// calls, scoped to that one command) as `last`.
+//
+// A *set* (FA<digits>, TQ<digit>, MD<digit>, TX/RX) represents a real
+// operator action, not a routine poll - those keep logging every time,
+// unchanged from before; this helper is only ever used on the get side.
+static void cat_log_get(char *last, size_t last_size, const char *new_reply,
+                         const char *log_line) {
+    if (strncmp(last, new_reply, last_size) == 0) return;
+    snprintf(last, last_size, "%s", new_reply);   // truncates+NUL-terminates safely
+    printf("%s", log_line);
+}
+
 static void cat_handle_command(char *cmd)
 {
     size_t len = strlen(cmd);
@@ -797,10 +824,29 @@ static void cat_handle_command(char *cmd)
     // --- ID: get only - identify as a Kenwood TS-480 (ID code 020),
     // matching the QRP Labs QMX's own choice for the same reason: FLRig
     // (or anything else) will expect TS-480 behavior from every other
-    // command once it sees this. ---
+    // command once it sees this. Never actually changes, so this only
+    // ever logs once (see cat_log_get() above). ---
     if (len == 2 && strncmp(cmd, "ID", 2) == 0) {
+        static char last[8] = "";
         cat_send("ID020;");
-        printf("cat: ID -> 020 (TS-480)\n");
+        cat_log_get(last, sizeof(last), "ID020;", "cat: ID -> 020 (TS-480)\n");
+        return;
+    }
+
+    // --- AC: antenna tuner control - part of FLRig's standard Kenwood
+    // status poll (bench-confirmed 2026-09: sent every poll cycle
+    // alongside FA/FB/MD), but minibitx has no antenna tuner to report
+    // on. A real Kenwood radio with no tuner accessory installed
+    // wouldn't have anything more useful to say here either - recognized
+    // and silently ignored (no reply, no log) rather than falling into
+    // the generic "unrecognized" branch below, which would otherwise log
+    // this exact benign, expected query every single poll forever. If
+    // bench-testing ever shows FLRig's own UI misbehaving without a
+    // reply (e.g. a tuner button stuck in an unknown state), a real
+    // "AC000;" (tuner off / not tuning / not selected) reply could be
+    // added then - not done here since the exact field meanings aren't
+    // confirmed against real hardware. ---
+    if (len >= 2 && cmd[0] == 'A' && cmd[1] == 'C') {
         return;
     }
 
@@ -808,10 +854,12 @@ static void cat_handle_command(char *cmd)
     // digits>" is a set. ---
     if (len >= 2 && cmd[0] == 'F' && cmd[1] == 'A') {
         if (len == 2) {
-            char buf[16];
+            static char last[16] = "";
+            char buf[16], log_line[48];
             snprintf(buf, sizeof(buf), "FA%011d;", freq_hdr);
             cat_send(buf);
-            printf("cat: FA -> %d Hz\n", freq_hdr);
+            snprintf(log_line, sizeof(log_line), "cat: FA -> %d Hz\n", freq_hdr);
+            cat_log_get(last, sizeof(last), buf, log_line);
         } else {
             long f = strtol(cmd + 2, NULL, 10);
             if (f > 0) {
@@ -829,10 +877,13 @@ static void cat_handle_command(char *cmd)
     // chk_vfo already takes. ---
     if (len >= 2 && cmd[0] == 'F' && cmd[1] == 'B') {
         if (len == 2) {
-            char buf[16];
+            static char last[16] = "";
+            char buf[16], log_line[64];
             snprintf(buf, sizeof(buf), "FB%011d;", freq_hdr);
             cat_send(buf);
-            printf("cat: FB -> %d Hz (single VFO, mirrors FA)\n", freq_hdr);
+            snprintf(log_line, sizeof(log_line),
+                     "cat: FB -> %d Hz (single VFO, mirrors FA)\n", freq_hdr);
+            cat_log_get(last, sizeof(last), buf, log_line);
         } else {
             printf("cat: FB%s -> ok (single VFO, not applied)\n", cmd + 2);
         }
@@ -865,10 +916,12 @@ static void cat_handle_command(char *cmd)
     // ask for the same thing). ---
     if (len >= 2 && cmd[0] == 'T' && cmd[1] == 'Q') {
         if (len == 2) {
-            char buf[8];
+            static char last[8] = "";
+            char buf[8], log_line[32];
             snprintf(buf, sizeof(buf), "TQ%d;", in_tx ? 1 : 0);
             cat_send(buf);
-            printf("cat: TQ -> %s\n", in_tx ? "TX" : "RX");
+            snprintf(log_line, sizeof(log_line), "cat: TQ -> %s\n", in_tx ? "TX" : "RX");
+            cat_log_get(last, sizeof(last), buf, log_line);
         } else {
             int tx_on = (cmd[2] != '0');
             if (cw_tx_active()) {
@@ -884,10 +937,12 @@ static void cat_handle_command(char *cmd)
     // --- MD: mode - cosmetic only, see cat_current_mode's comment above. ---
     if (len >= 2 && cmd[0] == 'M' && cmd[1] == 'D') {
         if (len == 2) {
-            char buf[8];
+            static char last[8] = "";
+            char buf[8], log_line[32];
             snprintf(buf, sizeof(buf), "MD%s;", cat_current_mode);
             cat_send(buf);
-            printf("cat: MD -> %s\n", cat_current_mode);
+            snprintf(log_line, sizeof(log_line), "cat: MD -> %s\n", cat_current_mode);
+            cat_log_get(last, sizeof(last), buf, log_line);
         } else {
             cat_current_mode[0] = cmd[2];
             cat_current_mode[1] = '\0';
@@ -910,19 +965,34 @@ static void cat_handle_command(char *cmd)
     // MD/TQ individually work fine, this is the first place to check,
     // ideally against a packet capture of a real QMX's IF response.
     if (len == 2 && strncmp(cmd, "IF", 2) == 0) {
-        char buf[40];
+        static char last[40] = "";
+        char buf[40], log_line[80];
         snprintf(buf, sizeof(buf), "IF%011d00000+0000000%02d%d%s00000000;",
                  freq_hdr, 0 /* memory channel */, in_tx ? 1 : 0, cat_current_mode);
         cat_send(buf);
-        printf("cat: IF -> sent (freq %d, %s, mode %s)\n",
-               freq_hdr, in_tx ? "TX" : "RX", cat_current_mode);
+        snprintf(log_line, sizeof(log_line), "cat: IF -> sent (freq %d, %s, mode %s)\n",
+                 freq_hdr, in_tx ? "TX" : "RX", cat_current_mode);
+        cat_log_get(last, sizeof(last), buf, log_line);
         return;
     }
 
     // Unknown command - Kenwood radios generally stay silent on anything
     // they don't recognize (no Hamlib-style "unknown command" reply
     // convention exists here), so match that rather than invent one.
-    printf("cat: %s -> unrecognized, ignored\n", cmd);
+    // Logging is still throttled to repeat-suppression (not full
+    // silence, unlike AC above) since an unrecognized command here is
+    // more likely a genuine gap worth noticing than AC's known-benign
+    // poll - but a client stuck retrying the very same unrecognized
+    // command every cycle (as FLRig already does for AC, and might for
+    // some other command not yet seen) shouldn't get a fresh line every
+    // single time either.
+    {
+        static char last_unrecognized[CAT_LINE_MAX] = "";
+        if (strncmp(last_unrecognized, cmd, sizeof(last_unrecognized)) != 0) {
+            snprintf(last_unrecognized, sizeof(last_unrecognized), "%s", cmd);
+            printf("cat: %s -> unrecognized, ignored\n", cmd);
+        }
+    }
 }
 
 // Puts the ACM tty into raw mode: no line discipline, no echo, one byte
