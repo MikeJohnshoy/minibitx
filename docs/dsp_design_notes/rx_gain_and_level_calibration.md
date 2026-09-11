@@ -1,9 +1,10 @@
 # RX Gain and Level Calibration: Using the 24 Bits Well
 
-Status: **proposed** - not started. This records a design discussion
-(2026-09) about how to approach setting/verifying RX gain, before any
-code exists for it, so the reasoning and the right order of operations
-aren't lost before someone picks it up.
+Status: a temporary diagnostic build now exists (§6) implementing the
+noise-floor/strong-signal check from §4 - not yet run on the bench. This
+still records the original design discussion (2026-09) about how to
+approach setting/verifying RX gain, so the reasoning and the right order
+of operations aren't lost.
 
 ## 1. Background
 
@@ -69,11 +70,12 @@ in `setup_audio_codec()` (`sound.c`):
 
 ```c
 sound_mixer("hw:0", "Input Mux", 0);
-sound_mixer("hw:0", "Line", 80);  // 80% of max
+sound_mixer("hw:0", "Line", RX_LINE_GAIN_PERCENT);  // 80% of max, by default
 sound_mixer("hw:0", "Mic", 0);
 ```
 
-`80` has no documented derivation behind it - it reads as a
+`RX_LINE_GAIN_PERCENT` (a named constant now, `sound.c` - previously a
+bare `80` inline) has no documented derivation behind it - it reads as a
 reasonable-sounding default, not a bench-verified operating point the
 way `TX_GAIN_CORRECTION` (0.045) was wattmeter-calibrated on the TX
 side (`tx_power_calibration.md`). If that setting is wrong in either
@@ -104,15 +106,21 @@ Line-in setting first, independently of it:
    loudest realistic signal available (a strong local station, a busy
    contest weekend, or a signal generator if one's on hand) and check
    where its peaks land:
-   - Regularly slamming into full-scale codes → `Line` (80) needs to
-     come down before anything else here is worth trusting.
+   - Regularly slamming into full-scale codes → `RX_LINE_GAIN_PERCENT`
+     (80) needs to come down before anything else here is worth
+     trusting.
    - Never getting anywhere close to full-scale even on the loudest
-     signal found → there's room to raise `Line` and buy back real
-     bits.
+     signal found → there's room to raise it and buy back real bits.
 3. **Only then**, once 1-2 confirm the analog stage is in a sane place,
    does band-by-band peak logging over time become meaningful - it's
    fine-tuning against a validated baseline rather than measuring
    around a moving target.
+
+Remember the real ceiling here is the WM8731 ADC's own usable dynamic
+range/noise floor, not the literal 144dB a 24-bit container could
+theoretically hold - the goal is "strongest realistic signal sits
+comfortably under full-scale, noise floor sits comfortably above the
+quantization floor," not "hit every last bit."
 
 ## 5. What's not decided yet
 
@@ -121,7 +129,64 @@ Line-in setting first, independently of it:
   all if the analog stage alone turns out sufficient across all bands)
   is an open question - this doc only covers how to validate the
   starting point and gather trustworthy data, not what to do with it.
-- No code exists yet for the noise-floor/strong-signal checks above or
-  for band-by-band peak logging itself - both would most naturally be
-  a temporary diagnostic build (or a debug flag), not something wired
-  into every day operation of `sound_process()`.
+- Whether `RX_LINE_GAIN_PERCENT` itself needs to change from 80 - that's
+  exactly what §6's diagnostic build and the bench session it enables
+  are for.
+- Whether this analog setting should ever become runtime-adjustable
+  (a live CAT/rigctl "RF gain" control) rather than a fixed,
+  bench-calibrated constant re-set at compile time, the way
+  `TX_GAIN_CORRECTION` already is on the TX side. Current thinking
+  leans toward keeping it fixed, in line with minibitx's minimal-
+  onboard-controls philosophy - a live analog gain control has no level
+  meter to react to today, and a coarse ALSA mixer step is a clumsier
+  lever than a downstream digital multiplier would be if per-band
+  differences ever turn out to matter. Not a final decision, just the
+  current lean.
+
+## 6. The diagnostic build
+
+`sound.c` has a bench-only instrumentation path, compiled in only with
+`-DRX_GAIN_DIAG`:
+
+```
+make CPPFLAGS=-DRX_GAIN_DIAG
+```
+
+(`CPPFLAGS`, not `CFLAGS` - a plain `make CFLAGS+=...` on the command
+line replaces this Makefile's own `CFLAGS` line entirely rather than
+adding to it, silently dropping `-O3 -march=native -Wall -Wextra
+-std=gnu11` in the process; `CPPFLAGS` is untouched by the Makefile, so
+passing it this way only adds the diagnostic define.) Rebuild plain
+`make` afterward to return to a normal binary - the two shouldn't be
+mixed up, since the diagnostic build's `printf`s are not something to
+leave running in normal operation.
+
+It taps the raw ADC sample (`rf` in `sound_process()`, before any
+digital mixing/filtering - see Caveat 2 above for why that's the right
+point to measure), and once per second of audio (96000 samples at the
+fixed 96kHz capture rate) prints one line:
+
+```
+rxgain: freq=7030000 line=80% peak=-8.3dBFS rms=-42.1dBFS
+```
+
+- `freq` and `line` are just the currently tuned dial frequency and the
+  compiled-in `RX_LINE_GAIN_PERCENT`, included so a captured log is
+  self-describing without needing separate notes.
+- `peak`/`rms` are in dBFS (0 = full-scale); a window that ever actually
+  hits full-scale gets a trailing `*** CLIPPING ***` marker so it's
+  unambiguous when scanning a captured log.
+- Redirect/tee console output to a file per test run to build up a
+  record, e.g. `./minibitx | tee rxgain_20m_dummyload_line80.log` -
+  naming each file by band/condition/gain setting keeps a multi-run
+  sweep straightforward to compare afterward.
+
+Suggested first session, matching the two-sided check in §4: on a dummy
+load (no antenna signal - the noise-floor check), tune so the FT8
+sub-band sits at the center of the IF passband rather than its edge (so
+the anti-alias filter's full margin is available), and let it run for a
+minute or so on 20m, then repeat on 40m - all at today's default
+`RX_LINE_GAIN_PERCENT` (80) as the baseline before trying anything else.
+Follow with the strong-signal side of the check (real antenna, active
+band) the same way, same two bands, same starting gain, before
+considering whether 80 needs to move.
