@@ -7,16 +7,32 @@
 #ifndef RADIO_HW_H
 #define RADIO_HW_H
 
-/* ---- GPIO pin assignments (wiringPi numbering, sBitx v2 hardware) ----- */
+/* ---- GPIO pin assignments (BCM GPIO numbering, sBitx v2 hardware) -----
+ *
+ * These used to be wiringPi's own pin numbers (a different numbering
+ * from BCM's), back when radio_hw.c drove them through wiringPi. Now that
+ * radio_hw.c talks to gpio.c's character-device API instead - which
+ * takes BCM offsets, matching /dev/gpiochip0 - these constants are BCM
+ * numbers. The old->new mapping (and the live `gpio readall` capture on
+ * real hardware it was verified against) is recorded in
+ * docs/01_hardware_init_and_control.md; don't reuse the old numeric
+ * values here as if they still meant the same physical pins - wiringPi's
+ * numbering and BCM's numbering are two unrelated schemes that happen to
+ * both be small integers.
+ */
 
-#define TX_LINE   4    // T/R relay control line
-#define TX_POWER  27   // set once at boot, LOW; purpose unconfirmed in sbitx
-#define EXT_PTT   26   // external PTT input/output line
-#define LPF_A     5    // low-pass filter select lines, one active at a time
-#define LPF_B     6
-#define LPF_C     10
-#define LPF_D     11
-#define CW_KEY    7    // straight key input (active low - open = idle,
+#define TX_LINE   23   // T/R relay control line
+#define TX_POWER  16   // set once at boot, LOW; purpose unconfirmed in sbitx
+#define EXT_PTT   12   // external PTT input/output line
+#define LPF_A     24   // low-pass filter select lines, one active at a time
+#define LPF_B     25
+#define LPF_C     8    // shares a physical pin with SPI0's CE0 - unused as
+                       // SPI on this board, so repurposing it as a plain
+                       // GPIO output is safe (confirmed via `gpio readall`:
+                       // it shows as OUT, not ALT0/SPI mode)
+#define LPF_D     7    // shares a physical pin with SPI0's CE1 - same as
+                       // LPF_C above
+#define CW_KEY    4    // straight key input (active low - open = idle,
                        // closed to ground = key down)
 
 /* ---- Board hardware revision ------------------------------------------ */
@@ -24,10 +40,13 @@
 #define SBITX_DE  (0)  // original sBitx, no power/SWR bridge board present
 #define SBITX_V2  (1)  // v2-and-later, power/SWR bridge board present
 
-/* Initializes wiringPi and configures TX_LINE, TX_POWER, EXT_PTT, and the
- * four LPF select lines as outputs, driving them to their idle (LOW)
- * state. Call once, before any other GPIO or radio_hw function. Returns 0
- * on success, -1 if the underlying wiringPi setup fails. */
+/* Requests TX_LINE, TX_POWER, EXT_PTT, and the four LPF select lines as
+ * GPIO outputs (via gpio.c), driving them to their idle (LOW) state as
+ * part of the same request, and requests CW_KEY as an input with its
+ * pull-up enabled. Call once, before any other GPIO or radio_hw
+ * function. Returns 0 on success, -1 if any of those line requests fail
+ * (e.g. /dev/gpiochip0 missing, or a pin already claimed by something
+ * else). */
 int radio_hw_gpio_init(void);
 
 /* Probes I2C address 0x8 (the power/SWR bridge board) to distinguish
