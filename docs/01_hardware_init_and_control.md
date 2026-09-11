@@ -184,10 +184,17 @@ writes on minibitx's behalf):
 
 ```c
 sound_mixer("hw:0", "Input Mux", 0);
-sound_mixer("hw:0", "Line", 80);  // 80% of max
+sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON);           // on/off switch, not a gain
+sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 50% of max
 sound_mixer("hw:0", "Mic", 0);
 sound_mixer("hw:0", "Master", 0); // Mute local speaker
 ```
+
+(`'Line'` looked like a gain control at first glance but bench-checking
+`amixer -c 0 sget 'Line'` shows it's a plain on/off switch; the real
+analog gain ahead of the ADC is the separate `'Capture'` control - see
+[`dsp_design_notes/rx_gain_and_level_calibration.md`](dsp_design_notes/rx_gain_and_level_calibration.md)
+§3 for the full story.)
 
 Once the mixer is configured, `sound_thread_start("hw:0,0")` opens the
 ALSA capture (and playback) PCM devices at the fixed 96 kHz sample rate
