@@ -1,4 +1,10 @@
-// usb_gadget.c — see usb_gadget.h for scope and architecture.
+/*
+ * usb_gadget.c — see usb_gadget.h for scope and architecture.
+ *
+ * Ported near-verbatim from the UAC2 section of sbitx's hpsdr_p1.c
+ * (Mike/KB2ML). No sBitx/GTK dependency in this file — only ALSA and
+ * Linux configfs/sysfs — so the port was mechanical.
+ */
 
 #include "usb_gadget.h"
 
@@ -328,19 +334,59 @@ static void uac_gadget_destroy(void) {
     snprintf(path, sizeof(path), "%s/configs/c.1/acm.usb0", UAC_GADGET_ROOT);
     unlink(path);
 
-    // Remove config strings, config, function strings directories in order
-    // (configfs requires directories to be emptied before rmdir)
-    char dirs[6][256];
+    // Remove config strings, config, and the uac2.0 function's own
+    // directory (configfs requires directories to be emptied before
+    // rmdir) - but NOT functions/acm.usb0's own directory. That one is
+    // deliberately skipped: bench-confirmed (2026-09, kernel
+    // 6.18.39+rpt-rpi-v8, running with no USB host ever connected)
+    // to hang this process forever, unkillable even with SIGKILL,
+    // recoverable only by rebooting the Pi. `sudo dmesg` at the time
+    // showed the blocked task's kernel stack as:
+    //   gserial_free_port <- gserial_free_line <- acm_free_instance
+    //   <- usb_put_function_instance <- acm_attr_release
+    //   <- config_item_cleanup <- config_item_put <- configfs_rmdir
+    //   <- vfs_rmdir <- do_rmdir <- __arm64_sys_unlinkat
+    // i.e. rmdir() on this exact directory is what asks the kernel to
+    // actually free the underlying gserial/ttyGS0 port, and that free
+    // path itself blocks in schedule() - a kernel-side issue in
+    // u_serial.c/usb_f_acm.c on this kernel build, not anything under
+    // this process's control (the UDC unbind write above it, and every
+    // other unlink()/rmdir() in this function, already completed
+    // successfully by the time this was captured - only this one call
+    // is implicated). See docs/usb_gadget_os_setup.md for the full
+    // writeup.
+    //
+    // Skipping it is safe: configfs is in-memory and doesn't survive a
+    // reboot, so never freeing this one function across a graceful
+    // shutdown isn't a lasting leak - it just means the underlying
+    // kernel object (and functions/acm.usb0's directory, and anything
+    // still containing it) stays alive, harmlessly, for the rest of
+    // this boot. uac_gadget_create()'s own self-heal logic already
+    // tolerates a leftover directory tree (mkdir/symlink calls there
+    // already treat EEXIST as success), so restarting minibitx again on
+    // the same boot just reuses the same never-freed ACM function
+    // instead of recreating it - the one difference from before is that
+    // this directory (and, since it's non-empty, its "functions"
+    // parent, and the gadget root above that) may never actually
+    // disappear until reboot, where they used to.
+    char dirs[4][256];
     snprintf(dirs[0], 256, "%s/configs/c.1/strings/0x409",  UAC_GADGET_ROOT);
     snprintf(dirs[1], 256, "%s/configs/c.1",                UAC_GADGET_ROOT);
     snprintf(dirs[2], 256, "%s/functions/uac2.0",           UAC_GADGET_ROOT);
-    snprintf(dirs[3], 256, "%s/functions/acm.usb0",         UAC_GADGET_ROOT);
-    snprintf(dirs[4], 256, "%s/strings/0x409",              UAC_GADGET_ROOT);
-    snprintf(dirs[5], 256, "%s",                            UAC_GADGET_ROOT);
-    for (int i = 0; i < 6; i++)
+    snprintf(dirs[3], 256, "%s/strings/0x409",              UAC_GADGET_ROOT);
+    for (int i = 0; i < 4; i++)
         rmdir(dirs[i]);   // silently tolerate ENOTEMPTY / ENOENT
 
-    printf("uac: gadget removed\n");
+    // Deliberately NOT attempted: rmdir(functions/acm.usb0) (see above)
+    // and rmdir(UAC_GADGET_ROOT) itself - the latter would fail anyway
+    // (ENOTEMPTY, tolerated silently even if we did try it) since
+    // functions/acm.usb0 is still there, but skipping it outright makes
+    // the reason obvious to a future reader rather than relying on a
+    // silent, easy-to-miss ENOTEMPTY.
+
+    printf("uac: gadget partially removed (UDC unbound, config detached; "
+           "the ACM/CAT function's own directory is intentionally left in "
+           "place until reboot - see the comment above)\n");
 }
 
 /* ---------------------------------------------------------------------
@@ -719,6 +765,11 @@ int uac_is_active(void) {
 static volatile int cat_running = 0;
 static int cat_fd = -1;
 static pthread_t cat_thread_tid;
+static int cat_thread_started = 0;   // guards cat_stop() calling pthread_join()
+                                      // on a thread that was never created
+                                      // (cat_init() failing is non-fatal, and
+                                      // cat_stop() still runs unconditionally
+                                      // during shutdown either way)
 
 // Cosmetic-only "current mode" state, same idea as hamlib.c's current_mode -
 // minibitx has no onboard demod and (as of this writing) can only actually
@@ -961,7 +1012,7 @@ int cat_init(void)
         cat_running = 0;
         return -1;
     }
-    pthread_detach(cat_thread_tid);
+    cat_thread_started = 1;
     printf("init: CAT (Kenwood TS-480 subset) listening on %s\n", CAT_TTY_PATH);
     return 0;
 }
@@ -974,5 +1025,20 @@ void cat_stop(void)
         // hamlib_stop() closing listen_fd to unblock accept().
         close(cat_fd);
         cat_fd = -1;
+    }
+
+    // Joined rather than detached (this used to pthread_detach() and
+    // return immediately, matching hamlib's per-client threads - but
+    // those are one-off/short-lived; this one lives for the whole
+    // process, same as uac_writer_tid, so it gets the same pthread_join()
+    // treatment uac_stop() already gives that thread). This guarantees
+    // the reader thread has actually finished (and its copy of the fd is
+    // genuinely closed) before uac_gadget_destroy() touches the ACM
+    // function's configfs tree - not the cause of the rmdir hang
+    // documented there (that's a kernel-side block unrelated to our own
+    // fd state), but a real ordering gap worth closing on its own merits.
+    if (cat_thread_started) {
+        pthread_join(cat_thread_tid, NULL);
+        cat_thread_started = 0;
     }
 }
