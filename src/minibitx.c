@@ -62,9 +62,9 @@ int main(int argc, char **argv) {
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
 
-  // Board-specific calibration (currently just bfo_freq) lives in
-  // data/hw_settings.ini, not in source - the crystal filter center
-  // varies radio to radio. Load it before anything below uses bfo_freq.
+  // Board-specific calibration (xtal_filter_center and bfo_freq) lives
+  // in data/hw_settings.ini, not in source - the crystal filter center
+  // varies radio to radio. Load it before anything below uses either.
   hw_settings_load();
 
   // Claim all GPIO lines (LPF relays, TX_LINE, TX_POWER, EXT_PTT, CW_KEY)
@@ -77,14 +77,20 @@ int main(int argc, char **argv) {
   printf("init: GPIO configured, T/R relay and PTT held low (RX-safe state)\n");
 
   // Initialize the si5351 clock generator (this also brings up the I2C
-  // bus it needs). si5351bx_init() explicitly powers
-  // down all three clocks, so clk1 - the BFO that drives the crystal
-  // filter's second mixer stage, fixed at bfo_freq - has to be started
-  // here; nothing else in minibitx ever touches clk1.
+  // bus it needs). si5351bx_init() explicitly powers down all three
+  // clocks, so clk1 has to be started here before anything downstream
+  // needs it. Unlike before, clk1 no longer sits at one fixed value for
+  // the whole process: it starts here at its RX value
+  // (xtal_filter_center + RX_IF_FREQ_HZ - matches the RX-safe idle
+  // state everything else comes up in) and only switches to the real
+  // BFO (bfo_freq) for the duration of each TX burst, via
+  // radio_tx_apply() (radio.c) - see xtal_filter_center's comment there
+  // for why RX and TX need different clk1 values.
   si5351bx_init();
-  si5351bx_setfreq(1, bfo_freq);
+  si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
   si5351_reset();
-  printf("init: si5351 oscillator ready, BFO (clk1) fixed at %d Hz\n", bfo_freq);
+  printf("init: si5351 oscillator ready, clk1 (RX) at %d Hz\n",
+         xtal_filter_center + RX_IF_FREQ_HZ);
 
   // Board revision and the INA260 power monitor both live on the same I2C
   // bus si5351bx_init() just brought up, so they can only be probed after
