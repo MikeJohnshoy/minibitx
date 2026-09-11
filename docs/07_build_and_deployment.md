@@ -23,6 +23,7 @@ Status: stub.
   Pi via GPIO instead of USB-C). See
   [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md).
 - Deployment: running under a plain terminal versus systemd/journald —
-  see the status-line fallback behavior noted in
-  [`05_process_and_threading_model.md`](05_process_and_threading_model.md).
+  see [`05_process_and_threading_model.md`](05_process_and_threading_model.md)
+  for how minibitx reports operational state either way (per-command
+  console echoes, not a periodic status line).
 - `credits` — upstream sbitx code this project is based on.
