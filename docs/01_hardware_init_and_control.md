@@ -36,19 +36,27 @@ exists yet.
 
 ## GPIO setup and the RX-safe idle state
 
-`radio_hw_gpio_init()` (`radio_hw.c`) calls `wiringPiSetupGpio()`, sets
-`TX_LINE`, `TX_POWER`, `EXT_PTT`, and the four LPF select lines
-(`LPF_A`–`LPF_D`) to `OUTPUT`, and then drives all of them low:
+`radio_hw_gpio_init()` (`radio_hw.c`) requests `TX_LINE`, `TX_POWER`,
+`EXT_PTT`, and the four LPF select lines (`LPF_A`–`LPF_D`) as outputs
+through `gpio.c`'s wrapper around the Linux GPIO character-device API
+(`/dev/gpiochip0`), and `CW_KEY` as an input with its pull-up enabled:
 
 ```c
-digitalWrite(LPF_A, LOW);
-digitalWrite(LPF_B, LOW);
-digitalWrite(LPF_C, LOW);
-digitalWrite(LPF_D, LOW);
-digitalWrite(EXT_PTT, LOW);
-digitalWrite(TX_LINE, LOW);
-digitalWrite(TX_POWER, LOW);
+line_tx_line  = gpio_request_output(TX_LINE,  0, "minibitx-tx_line");
+line_tx_power = gpio_request_output(TX_POWER, 0, "minibitx-tx_power");
+line_ext_ptt  = gpio_request_output(EXT_PTT,  0, "minibitx-ext_ptt");
+line_lpf_a    = gpio_request_output(LPF_A,    0, "minibitx-lpf_a");
+line_lpf_b    = gpio_request_output(LPF_B,    0, "minibitx-lpf_b");
+line_lpf_c    = gpio_request_output(LPF_C,    0, "minibitx-lpf_c");
+line_lpf_d    = gpio_request_output(LPF_D,    0, "minibitx-lpf_d");
+line_cw_key   = gpio_request_input(CW_KEY, 1, "minibitx-cw_key");
 ```
+
+Unlike the old wiringPi-based version, there's no separate "set the pin
+mode, then write it low" sequence — each `gpio_request_output()` call
+claims the line and drives it to its initial value (`0`, here) as one
+atomic kernel request, so there's no window where a line briefly holds
+whatever power-on/pinctrl default it had before minibitx touched it.
 
 `EXT_PTT` and `TX_LINE` low is the T/R relay's RX-idle state. Because
 this runs before the si5351, the VFO, the network threads, or either
@@ -59,6 +67,38 @@ anything capable of calling `radio_set_tx()` is even initialized.
 
 `TX_POWER` is also set low at boot; its exact purpose is inherited from
 sbitx and unconfirmed here (see `radio_hw.h`).
+
+### Migrating off wiringPi: BCM pin mapping
+
+minibitx used to drive these pins through wiringPi, which numbers pins
+in its own scheme rather than the SoC's BCM GPIO numbers. Since
+wiringPi is unmaintained upstream (and has no Pi 5 support), `radio_hw.c`
+was moved onto `gpio.c`'s direct character-device API, which takes BCM
+offsets — so every pin constant in `radio_hw.h` changed from a wiringPi
+number to the corresponding BCM number. The mapping below was derived
+from a `gpio readall` capture on real sBitx v2 hardware (Pi 4, bench,
+2026-09) with nothing running at the time — informative for pin
+*identity* and *direction* (a pin already latched as `OUT` by a previous
+run confirms which physical pins get driven as outputs, regardless of
+whether anything is running right now), but not for the specific logic
+levels captured, which were just whatever a previous run happened to
+leave behind rather than a live read of the radio's current state:
+
+| `radio_hw.h` name | wiringPi # (old) | BCM # (current) | Physical pin | Role |
+|---|---|---|---|---|
+| `TX_LINE` | 4 | 23 | 16 | T/R relay control |
+| `TX_POWER` | 27 | 16 | 36 | set low at boot, purpose unconfirmed |
+| `EXT_PTT` | 26 | 12 | 32 | external PTT |
+| `LPF_A` | 5 | 24 | 18 | LPF band select |
+| `LPF_B` | 6 | 25 | 22 | LPF band select |
+| `LPF_C` | 10 | 8 | 24 | LPF band select (shares SPI0's CE0 pin, unused as SPI here) |
+| `LPF_D` | 11 | 7 | 26 | LPF band select (shares SPI0's CE1 pin, unused as SPI here) |
+| `CW_KEY` | 7 | 4 | 7 | straight key input, pull-up, active low |
+
+If this ever needs porting to different hardware (a different Pi model,
+a different board layout), re-derive this table the same way — from a
+real `gpio readall` (or equivalent) on that specific board — rather than
+assuming these BCM numbers carry over.
 
 ## Board revision detection
 
