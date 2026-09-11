@@ -765,11 +765,6 @@ int uac_is_active(void) {
 static volatile int cat_running = 0;
 static int cat_fd = -1;
 static pthread_t cat_thread_tid;
-static int cat_thread_started = 0;   // guards cat_stop() calling pthread_join()
-                                      // on a thread that was never created
-                                      // (cat_init() failing is non-fatal, and
-                                      // cat_stop() still runs unconditionally
-                                      // during shutdown either way)
 
 // Cosmetic-only "current mode" state, same idea as hamlib.c's current_mode -
 // minibitx has no onboard demod and (as of this writing) can only actually
@@ -1012,7 +1007,12 @@ int cat_init(void)
         cat_running = 0;
         return -1;
     }
-    cat_thread_started = 1;
+    // Detached, not joined - see cat_stop()'s comment for why this is
+    // deliberate rather than an oversight (a version of this that DID
+    // join was tried and bench-confirmed to reintroduce the same class
+    // of unkillable shutdown hang §14 of usb_gadget_os_setup.md already
+    // documents for a different call).
+    pthread_detach(cat_thread_tid);
     printf("init: CAT (Kenwood TS-480 subset) listening on %s\n", CAT_TTY_PATH);
     return 0;
 }
@@ -1027,18 +1027,28 @@ void cat_stop(void)
         cat_fd = -1;
     }
 
-    // Joined rather than detached (this used to pthread_detach() and
-    // return immediately, matching hamlib's per-client threads - but
-    // those are one-off/short-lived; this one lives for the whole
-    // process, same as uac_writer_tid, so it gets the same pthread_join()
-    // treatment uac_stop() already gives that thread). This guarantees
-    // the reader thread has actually finished (and its copy of the fd is
-    // genuinely closed) before uac_gadget_destroy() touches the ACM
-    // function's configfs tree - not the cause of the rmdir hang
-    // documented there (that's a kernel-side block unrelated to our own
-    // fd state), but a real ordering gap worth closing on its own merits.
-    if (cat_thread_started) {
-        pthread_join(cat_thread_tid, NULL);
-        cat_thread_started = 0;
-    }
+    // Deliberately does NOT pthread_join() the reader thread. An earlier
+    // version of this function did (to guarantee the thread had actually
+    // exited, and its /dev/ttyGS0 fd was genuinely released, before
+    // uac_gadget_destroy() ever touched the ACM function's configfs
+    // tree) - bench-confirmed (2026-09) to turn into the exact same kind
+    // of unkillable shutdown hang documented in
+    // docs/usb_gadget_os_setup.md §14, just relocated earlier in the
+    // shutdown sequence: with no USB host ever connected, the reader
+    // thread's own close()/exit path apparently can block in the same
+    // way that section's rmdir() does (same underlying u_serial.c/ACM
+    // gadget subsystem, same "assumes a host will eventually
+    // acknowledge something" pattern) - and this time, since we were
+    // synchronously join()ing it, that block took the whole process down
+    // with it instead of just leaking one thread.
+    //
+    // Leaving this detached means: if that thread's own close() ever
+    // hangs the same way, it hangs alone - main() and the rest of
+    // shutdown are not waiting on it and can still complete. This is a
+    // conscious trade: no guarantee the ACM tty is genuinely released
+    // by the time uac_gadget_destroy() runs next, in exchange for
+    // shutdown actually completing. §14's rmdir() workaround already
+    // doesn't depend on that guarantee (it skips touching the ACM
+    // function's directory at all), so nothing downstream relies on
+    // this thread having fully exited first.
 }
