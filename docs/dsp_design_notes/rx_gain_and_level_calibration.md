@@ -1,7 +1,12 @@
 # RX Gain and Level Calibration: Using the 24 Bits Well
 
-Status: a temporary diagnostic build now exists (§6) implementing the
-noise-floor/strong-signal check from §4 - not yet run on the bench. This
+Status: a temporary diagnostic build exists (§6) implementing the
+noise-floor/strong-signal check from §4; one quiet-band capture has been
+taken on 40m (§6). Along the way, bench `amixer` inspection (2026-09)
+found that the analog gain stage this doc originally pointed at
+(`'Line'`) is actually just an on/off switch, not a gain control - see
+§3 for the corrected story and the resulting code fix
+(`RX_LINE_INPUT_ON` / `RX_CAPTURE_GAIN_PERCENT` in `sound.c`). This
 still records the original design discussion (2026-09) about how to
 approach setting/verifying RX gain, so the reasoning and the right order
 of operations aren't lost.
@@ -65,20 +70,36 @@ different questions.
 ## 3. Caveat 2: this assumes the analog gain ahead of the ADC is already set correctly
 
 Peak-logging happens entirely downstream of the one analog gain stage
-that actually matters here: the WM8731 codec's Line input level, fixed
-in `setup_audio_codec()` (`sound.c`):
+that actually matters here. That stage turned out *not* to be what it
+first looked like: `'Line'` (the WM8731 input-select control this doc
+originally pointed at) is actually just an on/off switch
+(`amixer -c 0 sget 'Line'` reports `Capabilities: cswitch` only - no
+volume or dB range at all). The real continuous gain control is a
+separate ALSA simple-mixer element, `'Capture'`
+(`Capabilities: cvolume`, raw range 0-31), which maps onto the WM8731's
+actual line-input attenuator (-34.5dB to +12dB in 1.5dB steps per the
+codec datasheet). Before this fix, `setup_audio_codec()` never set
+`'Capture'` explicitly at all - it simply ran at whatever the kernel's
+`wm8731` driver defaulted to on boot (confirmed by bench measurement:
+step 15 of 31, i.e. 48%, -12.00dB). `setup_audio_codec()` now sets both
+explicitly:
 
 ```c
 sound_mixer("hw:0", "Input Mux", 0);
-sound_mixer("hw:0", "Line", RX_LINE_GAIN_PERCENT);  // 80% of max, by default
+sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON);        // on/off switch, not a gain
+sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 50% of max, by default
 sound_mixer("hw:0", "Mic", 0);
 ```
 
-`RX_LINE_GAIN_PERCENT` (a named constant now, `sound.c` - previously a
-bare `80` inline) has no documented derivation behind it - it reads as a
-reasonable-sounding default, not a bench-verified operating point the
-way `TX_GAIN_CORRECTION` (0.045) was wattmeter-calibrated on the TX
-side (`tx_power_calibration.md`). If that setting is wrong in either
+`RX_CAPTURE_GAIN_PERCENT` (`sound.c`) is deliberately set to 50, which
+`sound_mixer()`'s percent-to-raw conversion (`percent * max / 100`,
+integer division) turns into exactly `50*31/100 = 15` - the same step
+the driver was defaulting to, chosen so the diagnostic data already
+captured against that default (§6) stays valid. It has no other
+documented derivation behind it - it reads as a reasonable-sounding
+default, not a bench-verified operating point the way
+`TX_GAIN_CORRECTION` (0.045) was wattmeter-calibrated on the TX side
+(`tx_power_calibration.md`). If that setting is wrong in either
 direction, any digital peak data collected on top of it is measuring
 the consequences of that choice, not the radio itself:
 
@@ -106,8 +127,8 @@ Line-in setting first, independently of it:
    loudest realistic signal available (a strong local station, a busy
    contest weekend, or a signal generator if one's on hand) and check
    where its peaks land:
-   - Regularly slamming into full-scale codes → `RX_LINE_GAIN_PERCENT`
-     (80) needs to come down before anything else here is worth
+   - Regularly slamming into full-scale codes → `RX_CAPTURE_GAIN_PERCENT`
+     (50) needs to come down before anything else here is worth
      trusting.
    - Never getting anywhere close to full-scale even on the loudest
      signal found → there's room to raise it and buy back real bits.
@@ -129,9 +150,9 @@ quantization floor," not "hit every last bit."
   all if the analog stage alone turns out sufficient across all bands)
   is an open question - this doc only covers how to validate the
   starting point and gather trustworthy data, not what to do with it.
-- Whether `RX_LINE_GAIN_PERCENT` itself needs to change from 80 - that's
-  exactly what §6's diagnostic build and the bench session it enables
-  are for.
+- Whether `RX_CAPTURE_GAIN_PERCENT` itself needs to change from 50 -
+  that's exactly what §6's diagnostic build and the bench session it
+  enables are for.
 - Whether this analog setting should ever become runtime-adjustable
   (a live CAT/rigctl "RF gain" control) rather than a fixed,
   bench-calibrated constant re-set at compile time, the way
@@ -167,12 +188,12 @@ point to measure), and once per second of audio (96000 samples at the
 fixed 96kHz capture rate) prints one line:
 
 ```
-rxgain: freq=7030000 line=80% peak=-8.3dBFS rms=-42.1dBFS
+rxgain: freq=7030000 capture=50% peak=-8.3dBFS rms=-42.1dBFS
 ```
 
-- `freq` and `line` are just the currently tuned dial frequency and the
-  compiled-in `RX_LINE_GAIN_PERCENT`, included so a captured log is
-  self-describing without needing separate notes.
+- `freq` and `capture` are just the currently tuned dial frequency and
+  the compiled-in `RX_CAPTURE_GAIN_PERCENT`, included so a captured log
+  is self-describing without needing separate notes.
 - `peak`/`rms` are in dBFS (0 = full-scale); a window that ever actually
   hits full-scale gets a trailing `*** CLIPPING ***` marker so it's
   unambiguous when scanning a captured log.
@@ -186,7 +207,16 @@ load (no antenna signal - the noise-floor check), tune so the FT8
 sub-band sits at the center of the IF passband rather than its edge (so
 the anti-alias filter's full margin is available), and let it run for a
 minute or so on 20m, then repeat on 40m - all at today's default
-`RX_LINE_GAIN_PERCENT` (80) as the baseline before trying anything else.
-Follow with the strong-signal side of the check (real antenna, active
-band) the same way, same two bands, same starting gain, before
-considering whether 80 needs to move.
+`RX_CAPTURE_GAIN_PERCENT` (50) as the baseline before trying anything
+else. Follow with the strong-signal side of the check (real antenna,
+active band) the same way, same two bands, same starting gain, before
+considering whether 50 needs to move.
+
+The quiet-band capture already collected on 40m (2026-09, `'Line'`
+believed at the time to be the gain control, actually at its on/off
+default while `'Capture'` sat at the kernel driver's undocumented boot
+default of step 15/48%/-12dB) remains directly comparable to future
+runs at `RX_CAPTURE_GAIN_PERCENT=50`, since that constant was chosen
+specifically to reproduce that exact same -12dB operating point on
+purpose rather than by driver accident. It doesn't need to be redone -
+it can stand as the first data point in the sweep.
