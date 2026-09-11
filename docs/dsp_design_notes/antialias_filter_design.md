@@ -58,6 +58,55 @@ the filter's low-loss center while pushing the *unwanted* mirror product out int
 Practical consequence: `bfo_freq` and `TX_IF_OFFSET_HZ` are coupled, not
 independent. But neither value should change for a given set of hardware.
 
+### Splitting the filter-center reference out of bfo_freq
+
+The above explains why `bfo_freq` sits deliberately off the filter's
+true center for TX. What it glossed over: RX used to reuse that exact
+same `bfo_freq` value too (`radio_tune_to()`'s old
+`f + bfo_freq - RX_IF_FREQ_HZ` formula), even though RX has no reason to
+want it off-center at all - RX just wants the tuned signal placed as
+close to the filter's real passband peak as possible. That worked
+reasonably well only because `RX_IF_FREQ_HZ` (24,000 Hz - a pure
+digital/audio-IF choice, unrelated to the crystal filter) happened to
+sit close to `TX_IF_OFFSET_HZ + CW_PITCH_HZ` (23,300 Hz - a pure
+TX/image-rejection choice): RX landed within 1,400 Hz of the filter's
+true center as an incidental side effect, not by design. The real cost
+was the coupling itself: change `RX_IF_FREQ_HZ` for some unrelated
+digital-IF reason, and you'd unknowingly shift RX off-center *and* be
+tempted to "fix" it by changing `bfo_freq`, which would then throw away
+`TX_IF_OFFSET_HZ`'s careful image-rejection calibration - two unrelated
+design decisions, entangled through one shared number.
+
+The fix: a new constant, `xtal_filter_center` (`radio.c`, default
+40,012,400 Hz - the measured center from §2 above), names the crystal
+filter's real passband center directly, as a physical/measured property
+of the hardware rather than a clock setting. RX now aims at it exactly:
+`radio_tune_to()` computes `clk2 = f + xtal_filter_center`, and `clk1`
+(previously fixed at `bfo_freq` for the whole process) now sits at
+`xtal_filter_center + RX_IF_FREQ_HZ` while receiving, switching to
+`bfo_freq` only for the duration of each TX burst
+(`radio_tx_apply()`, `radio.c`) - the same clock, two different values,
+retuned on every RX/TX transition the same way `clk2` already was.
+`bfo_freq` keeps its old default and its old TX-only job unchanged; the
+relationship between the two is now explicit rather than implicit:
+`bfo_freq == xtal_filter_center + TX_IF_OFFSET_HZ`, by calibration (not
+enforced in code - `TX_IF_OFFSET_HZ` is still the one meant to be
+re-swept on the bench, per `cw.c`'s comment).
+
+Net effect: TX's actual clk1/clk2 values, and therefore its transmitted
+frequency and image suppression, are unchanged (verified algebraically
+identical to the pre-split formulas for today's constants - see
+[`../03_tx_processing_pipeline.md`](../03_tx_processing_pipeline.md)'s
+"Known limitations"). RX gets a small, intentional correction (its
+mixed signal now lands exactly on `xtal_filter_center` instead of
+1,400 Hz low) that's unlikely to be measurable given the filter's ~35
+kHz width, but the real payoff is structural: `RX_IF_FREQ_HZ` and
+`TX_IF_OFFSET_HZ` can each change independently going forward without
+silently perturbing the other. As with `bfo_freq`, re-verify on air
+after any change here - this touches real TX hardware, and the
+derivation being algebraically sound is not a substitute for a bench
+check.
+
 ## 4. How much does the analog filter help at Nyquist?
 
 Mapping the crystal filter's shape directly onto the 24kHz digital IF
@@ -174,4 +223,3 @@ quite easy on on the raspberry pi processors.
 Before inserting this filter into the RX pipeline I could see the recognizable unwanted image
 of - for example - FT8 signal activity on a SDR receiver spectrum display.  It wasn't really
 audible, but adding this filter removed the unwanted image with minimal processing cost.
-
