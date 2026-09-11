@@ -16,6 +16,7 @@
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 #include <alsa/asoundlib.h>
 
 /* ------------------------------------------------------------------ */
@@ -25,6 +26,16 @@
 #define CHANNELS         2        /* stereo: L = RX / R = Mic (capture) */
 #define PERIOD_FRAMES    1024     /* frames per period (matches old cfg) */
 #define MAX_FRAMES       4096
+
+// WM8731 "Line" input level (ALSA percent, 0-100) - the one analog gain
+// stage ahead of the ADC in the whole RX chain (no RF preamp on this
+// board). Not bench-verified against real signal levels yet - see
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md. Pulled out to
+// its own named constant (rather than a bare literal in
+// setup_audio_codec() below) specifically so a bench sweep - try 80,
+// rebuild, test; try a different value, rebuild, test - only ever
+// touches this one line.
+#define RX_LINE_GAIN_PERCENT 80
 
 /* ------------------------------------------------------------------ */
 /*  TX sample scaling - see hw_settings.h for the per-band 'scale'      */
@@ -131,7 +142,7 @@ void sound_mixer(char *card_name, char *element, int make_on)
 /* ------------------------------------------------------------------ */
 void setup_audio_codec(void) {
   sound_mixer("hw:0", "Input Mux", 0);
-  sound_mixer("hw:0", "Line", 80);  // 80% of max
+  sound_mixer("hw:0", "Line", RX_LINE_GAIN_PERCENT);
   sound_mixer("hw:0", "Mic", 0);
   sound_mixer("hw:0", "Master", 0); // Mute local speaker
   sound_mixer("hw:0", "Output Mixer HiFi", 1);
@@ -290,6 +301,48 @@ static void xrun_note(struct xrun_tracker *t, const char *label)
 /* ------------------------------------------------------------------ */
 /*  IQ mixing                                                         */
 /* ------------------------------------------------------------------ */
+#ifdef RX_GAIN_DIAG
+// Temporary bench diagnostic for
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md - not compiled
+// into normal builds (build with `make CFLAGS+=-DRX_GAIN_DIAG` to
+// enable it for a bench session, plain `make` otherwise). Tracks the
+// raw ADC sample - "rf" below, before any digital mixing or filtering -
+// against full scale, since that's the one signal in the whole chain
+// that reflects the WM8731 "Line" gain (RX_LINE_GAIN_PERCENT) directly,
+// independent of anything downstream (IQ mixing, the anti-alias
+// filter, decimation, or either output consumer's own scaling) - see
+// that doc's Caveat 2. Reports peak and RMS in dBFS once per ~1 second
+// of audio (96000 samples at this file's fixed 96kHz capture rate), so
+// a bench session produces one line per second, tagged with the
+// currently tuned frequency and Line setting so a captured log is
+// self-describing without needing separate notes.
+#define RXDIAG_WINDOW_SAMPLES 96000
+static double rxdiag_peak = 0.0;
+static double rxdiag_sumsq = 0.0;
+static long rxdiag_count = 0;
+
+static void rxdiag_sample(double rf) {
+    double a = fabs(rf);
+    if (a > rxdiag_peak) rxdiag_peak = a;
+    rxdiag_sumsq += rf * rf;
+    rxdiag_count++;
+    if (rxdiag_count >= RXDIAG_WINDOW_SAMPLES) {
+        double rms = sqrt(rxdiag_sumsq / (double)rxdiag_count);
+        // -240dBFS floor instead of -inf for a silent/all-zero window
+        // (e.g. before the antenna/dummy load is even connected) - keeps
+        // the log numeric and greppable rather than printing "-inf".
+        double peak_dbfs = 20.0 * log10(rxdiag_peak > 1e-12 ? rxdiag_peak : 1e-12);
+        double rms_dbfs  = 20.0 * log10(rms > 1e-12 ? rms : 1e-12);
+        printf("rxgain: freq=%d line=%d%% peak=%.1fdBFS rms=%.1fdBFS%s\n",
+               freq_hdr, RX_LINE_GAIN_PERCENT, peak_dbfs, rms_dbfs,
+               rxdiag_peak >= 0.999 ? "  *** CLIPPING ***" : "");
+        rxdiag_peak = 0.0;
+        rxdiag_sumsq = 0.0;
+        rxdiag_count = 0;
+    }
+}
+#endif
+
 static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speaker,
                            int32_t *output_tx, int n_samples) {
     static double i_samples[4096];
@@ -324,6 +377,9 @@ static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output
         vfo_read_iq(&lo, &lo_i, &lo_q);
 
         double rf = (double)s / 2147483648.0;
+#ifdef RX_GAIN_DIAG
+        rxdiag_sample(rf);
+#endif
 
         // mix to IQ
         i_samples[n] = rf * ((double)lo_i / 1073741824.0);
