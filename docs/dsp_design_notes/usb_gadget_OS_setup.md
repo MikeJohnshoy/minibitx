@@ -10,10 +10,12 @@ data actually reached the host at all, not just correct enumeration) is
 resolved. §13 adds a second gadget function (CDC-ACM, for CAT control)
 alongside the UAC2 one covered everywhere else in this document - that
 combination is new as of this writing and **not yet bench-tested**; see
-§13 for what to check first. §14 documents a real kernel-side hang this
-combination bench-confirmed on 2026-09 when shutting down with no USB
-host ever connected, and the workaround already applied in
-`usb_gadget.c` - read that before your first bench pass.
+§13 for what to check first. §14 documents two related kernel-side
+hangs this combination bench-confirmed on 2026-09 when shutting down
+with no USB host ever connected, and the workarounds already applied in
+`usb_gadget.c` (as of this writing, believed fixed but pending a
+confirming bench re-test - see §14's last two paragraphs) - read that
+before your first bench pass.
 
 ## 1. Background
 
@@ -665,3 +667,42 @@ needed on the create side.
   this workaround could potentially be removed - re-enabling the
   `functions/acm.usb0` `rmdir()` and re-testing a no-host shutdown would
   be the way to check.
+
+**Follow-on finding, same bench session:** the CAT reader thread
+(`cat_thread_fn()`, in the CAT section of `usb_gadget.c`) briefly had its
+lifecycle changed to `pthread_join()` on shutdown instead of
+`pthread_detach()`, to guarantee it had genuinely exited (and released
+its `/dev/ttyGS0` fd) before `uac_gadget_destroy()` ran. Bench-testing
+that change - fresh reboot, no USB host ever connected, start minibitx,
+Ctrl+C - reproduced the *same class* of unkillable shutdown hang, just
+relocated: this time the process never even reached `uac: ALSA PCM
+closed` (the first line `uac_stop()` prints, called *after* `cat_stop()`
+in the shutdown sequence), meaning the hang moved into `cat_stop()`
+itself - specifically, everything points at the newly-added
+`pthread_join()` call, since the exact same `cat_stop()` (without a
+join) demonstrably did *not* hang in the original bug report - that
+trace ran the same close()-and-return sequence and continued on to
+finish `uac_stop()`'s own teardown before hanging later, in
+`uac_gadget_destroy()`.
+
+The likely explanation is the same theme as the `rmdir()` bug above:
+the reader thread's own close()/exit path apparently can also block
+inside the same ACM/`u_serial.c` gadget machinery when no host was ever
+connected. The fix was to revert `cat_stop()` back to *not* joining that
+thread (see the comment on `cat_init()`/`cat_stop()`) - if that thread's
+own close() ever hangs the same way, it now hangs alone, without taking
+the rest of shutdown down with it. This does give up the ordering
+guarantee the join was meant to provide (that the ACM tty is genuinely
+released before `uac_gadget_destroy()` touches that function's configfs
+tree) - but nothing downstream actually depends on that guarantee, since
+this section's `rmdir()` workaround already avoids touching
+`functions/acm.usb0` at all.
+
+**Net effect of both fixes together:** shutdown with no USB host ever
+connected should now complete promptly, without hanging in either the
+`rmdir()` this section originally documented or the CAT thread's own
+teardown. If a *third* hang shows up somewhere else in this same
+shutdown sequence, look for the same signature first (a print that
+should have followed immediately never appears) before assuming
+something new and unrelated - this exact subsystem has now produced two
+hangs from the same underlying cause on this kernel build.
