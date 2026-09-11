@@ -10,7 +10,10 @@ data actually reached the host at all, not just correct enumeration) is
 resolved. §13 adds a second gadget function (CDC-ACM, for CAT control)
 alongside the UAC2 one covered everywhere else in this document - that
 combination is new as of this writing and **not yet bench-tested**; see
-§13 for what to check first.
+§13 for what to check first. §14 documents a real kernel-side hang this
+combination bench-confirmed on 2026-09 when shutting down with no USB
+host ever connected, and the workaround already applied in
+`usb_gadget.c` - read that before your first bench pass.
 
 ## 1. Background
 
@@ -577,3 +580,88 @@ new with a second function present:
 None of this is a hard dependency for the UAC2/WSJT-X path already
 confirmed working (§9, §11) - `cat_init()` failing, or FLRig never being
 tested, doesn't affect audio streaming or Hamlib/WSJT-X control at all.
+
+## 14. Shutdown hangs forever (unkillable) with no USB host ever connected - kernel bug, worked around
+
+**Bench-confirmed 2026-09**, Pi 4, kernel `6.18.39+rpt-rpi-v8` (Debian
+1:6.18.39-1+rpt1): starting minibitx with no USB cable connected at all,
+then stopping it (Ctrl+C), reliably hung the process forever -
+`ps -o pid,stat,wchan:32,comm -p <pid>` showed `STAT` as `Dl+`
+(uninterruptible sleep), and it did not respond to `kill -9`. The only
+way to recover was rebooting the Pi. `sudo dmesg` at the time of the
+hang showed the kernel's own hung-task detector firing, with this stack:
+
+```
+INFO: task minibitx:<pid> blocked for more than 120 seconds.
+task:minibitx state:D ...
+Call trace:
+ schedule+0x3c/0xf0
+ gserial_free_port+0xcc/0x140 [u_serial]
+ gserial_free_line+0x60/0xa0 [u_serial]
+ acm_free_instance+0x24/0x48 [usb_f_acm]
+ usb_put_function_instance+0x2c/0x50 [libcomposite]
+ acm_attr_release+0x18/0x38 [usb_f_acm]
+ config_item_cleanup+0x5c/0x90
+ config_item_put+0x70/0xb0
+ configfs_rmdir+0x210/0x340
+ vfs_rmdir+0x94/0x210
+ do_rmdir+0x158/0x1a0
+ __arm64_sys_unlinkat+0xa4/0xe0
+```
+
+That identifies the exact call: `rmdir()` on the ACM function's own
+configfs directory (`functions/acm.usb0`) - the step in
+`uac_gadget_destroy()` that asks the kernel to actually free the
+underlying `gserial`/`/dev/ttyGS0` port. `gserial_free_port()` itself is
+what's stuck in `schedule()` - a kernel-side block inside
+`u_serial.c`/`usb_f_acm.c` on this kernel build, most likely waiting on
+USB transfer/endpoint state tied to the ACM data endpoints that never
+resolves when no host ever enumerated to claim them. This is *not* our
+own `/dev/ttyGS0` file descriptor still being open - the UDC unbind
+write, both config-symlink `unlink()`s, and the `uac2.0` function's own
+`rmdir()` all completed successfully before this call was even reached
+(confirmed by the call stack itself: this is a later step in the same
+function, and there's no earlier hang reported).
+
+**Workaround applied in `usb_gadget.c`** (see the comment in
+`uac_gadget_destroy()`): shutdown no longer calls `rmdir()` on
+`functions/acm.usb0` at all. Everything else in that function's teardown
+still runs (UDC unbind, both symlink removals, the `uac2.0` function's
+own directory, the strings/config directories) - only that one call is
+skipped. This is safe because configfs is entirely in-memory and doesn't
+survive a reboot: never freeing this one function across a graceful
+shutdown just means the kernel object (and its directory, and anything
+still containing it - `functions/`, and the gadget root above that) stays
+allocated, harmlessly, for the rest of that boot. `uac_gadget_create()`'s
+own self-heal logic already tolerates a leftover directory tree (its
+`mkdir()`/`symlink()` calls already treat `EEXIST` as success, for
+exactly the "previous run didn't shut down cleanly" case this was built
+for) - so restarting minibitx again on the same boot reuses the same
+never-freed ACM function rather than recreating it, with no code changes
+needed on the create side.
+
+**What this means in practice:**
+
+- A clean Ctrl+C shutdown with no host ever connected now completes and
+  returns to the shell promptly - the actual bug this section exists to
+  fix.
+- `uac: gadget removed` no longer prints on shutdown (that line assumed a
+  full teardown); it's replaced with `uac: gadget partially removed
+  (UDC unbound, config detached; the ACM/CAT function's own directory is
+  intentionally left in place until reboot...)` - expected, not an error.
+- Restarting minibitx again on the same boot should work fine (the
+  ACM function is reused, not recreated) - if you hit anything unexpected
+  there (the new COM port not reappearing on the host side, for
+  instance), that's worth its own bench report, since it would be new
+  territory this workaround doesn't cover.
+- If this was actually hit because a host WAS connected earlier in the
+  session and then disconnected before shutdown, that's a meaningfully
+  different scenario than the one bench-confirmed here (no host, ever)
+  and worth its own report too - this workaround was written and tested
+  against the "no host ever connected" case specifically.
+- If a future Raspberry Pi OS kernel update fixes this upstream
+  (`u_serial.c`'s `gserial_free_port()` blocking forever regardless of
+  host presence looks like a genuine kernel bug, not intended behavior),
+  this workaround could potentially be removed - re-enabling the
+  `functions/acm.usb0` `rmdir()` and re-testing a no-host shutdown would
+  be the way to check.
