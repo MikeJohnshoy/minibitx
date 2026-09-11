@@ -7,7 +7,7 @@ CC      := gcc
 # (see antialias.c) actually vectorize instead of just being eligible to.
 CFLAGS  := -O3 -march=native -Wall -Wextra -std=gnu11
 LDFLAGS := -lm -lasound -lpthread -ldl
-SRC := src/minibitx.c src/radio.c src/radio_hw.c src/hpsdr_p1.c src/usb_gadget.c src/status.c src/i2c.c \
+SRC := src/minibitx.c src/radio.c src/radio_hw.c src/hpsdr_p1.c src/usb_gadget.c src/i2c.c \
      src/si5351v2.c src/sound.c src/vfo.c src/hamlib.c src/hw_settings.c src/antialias.c src/decim48k.c src/cw.c \
      src/gpio.c
 OBJ := $(SRC:.c=.o)
