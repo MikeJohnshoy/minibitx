@@ -56,11 +56,17 @@
 // RX_IF_FREQ_HZ (24000, a different constant - the RX-side second-IF
 // target used in radio_tune_to()'s clk2 formula) rather than this filter's
 // actual measured offset from bfo_freq, so it landed on the wrong side of
-// the skirt. 22600 comes from bfo_freq (40035000) minus this radio's
-// measured filter center (40012400) - it's a starting point for a bench
-// check, not a value guaranteed correct on every board without verifying
-// against that board's own filter (the measured data behind 22600 came
-// from a different, "representative" unit, not this exact one).
+// the skirt. 22600 comes from bfo_freq (40035000) minus
+// xtal_filter_center (radio.c, 40012400 - this radio's measured filter
+// center) - it's a starting point for a bench check, not a value
+// guaranteed correct on every board without verifying against that
+// board's own filter (the measured data behind 22600 came from a
+// different, "representative" unit, not this exact one). Note this
+// difference product actually lands CW_PITCH_HZ short of
+// xtal_filter_center, not exactly on it (40035000 - 23300 = 40011700,
+// vs xtal_filter_center's 40012400) - a small, real residual from how
+// this constant was derived, not an oversight; see radio_tx_apply()'s
+// clk2 comment (radio.c) for where that residual gets accounted for.
 //
 // TO RE-TUNE ON THE BENCH: this constant only affects TX - no RX
 // implications, unlike bfo_freq, so it's safe to sweep on its own. Try
