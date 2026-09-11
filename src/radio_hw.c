@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <wiringPi.h>
+#include "gpio.h"
 #include "i2c.h"
 #include "radio_hw.h"
 
@@ -14,31 +14,53 @@
 #define CURRENT_REGISTER 0x01
 #define CONFIG_DEFAULT   0x6127 // Continuous mode, default averaging
 
-/* ---- Boot-time GPIO setup ---------------------------------------------- */
+/* ---- Boot-time GPIO setup ----------------------------------------------
+ *
+ * Each pin gets its own line-request handle from gpio.c, held for the
+ * life of the process (there's no radio_hw_gpio_shutdown() - same
+ * "opened once, never explicitly torn down" convention i2c.c already
+ * uses for its own fd). Every later function in this file writes/reads
+ * through these handles rather than a raw pin number - unlike wiringPi,
+ * the character-device API has no "just pass the pin number again"
+ * shortcut once a line has been requested.
+ */
+
+static int line_tx_line  = -1;
+static int line_tx_power = -1;
+static int line_ext_ptt  = -1;
+static int line_lpf_a    = -1;
+static int line_lpf_b    = -1;
+static int line_lpf_c    = -1;
+static int line_lpf_d    = -1;
+static int line_cw_key   = -1;
 
 int radio_hw_gpio_init(void)
 {
-	if (wiringPiSetup() < 0)   // not wiringPiSetupGPIO()
+	// Outputs are driven to their idle/RX-safe value (LOW/0) as part of
+	// the request itself - gpio.c's character-device requests set the
+	// initial output value atomically with claiming the line, so there's
+	// no separate "configure, then write LOW" step (and no window where
+	// the pin briefly holds whatever the kernel's own power-on/pinctrl
+	// default was) the way the old pinMode()-then-digitalWrite() sequence
+	// had.
+	line_tx_line  = gpio_request_output(TX_LINE,  0, "minibitx-tx_line");
+	line_tx_power = gpio_request_output(TX_POWER, 0, "minibitx-tx_power");
+	line_ext_ptt  = gpio_request_output(EXT_PTT,  0, "minibitx-ext_ptt");
+	line_lpf_a    = gpio_request_output(LPF_A,    0, "minibitx-lpf_a");
+	line_lpf_b    = gpio_request_output(LPF_B,    0, "minibitx-lpf_b");
+	line_lpf_c    = gpio_request_output(LPF_C,    0, "minibitx-lpf_c");
+	line_lpf_d    = gpio_request_output(LPF_D,    0, "minibitx-lpf_d");
+
+	// idle high; key closes to ground - matches wiringPi's PUD_UP before.
+	line_cw_key   = gpio_request_input(CW_KEY, 1, "minibitx-cw_key");
+
+	if (line_tx_line < 0 || line_tx_power < 0 || line_ext_ptt < 0 ||
+	    line_lpf_a < 0 || line_lpf_b < 0 || line_lpf_c < 0 ||
+	    line_lpf_d < 0 || line_cw_key < 0) {
+		// gpio_request_output()/gpio_request_input() already logged
+		// which pin and why.
 		return -1;
-
-	pinMode(TX_LINE, OUTPUT);
-	pinMode(TX_POWER, OUTPUT);
-	pinMode(EXT_PTT, OUTPUT);
-	pinMode(LPF_A, OUTPUT);
-	pinMode(LPF_B, OUTPUT);
-	pinMode(LPF_C, OUTPUT);
-	pinMode(LPF_D, OUTPUT);
-
-	pinMode(CW_KEY, INPUT);
-	pullUpDnControl(CW_KEY, PUD_UP); // idle high; key closes to ground
-
-	digitalWrite(LPF_A, LOW);
-	digitalWrite(LPF_B, LOW);
-	digitalWrite(LPF_C, LOW);
-	digitalWrite(LPF_D, LOW);
-	digitalWrite(EXT_PTT, LOW);
-	digitalWrite(TX_LINE, LOW);
-	digitalWrite(TX_POWER, LOW);
+	}
 
 	return 0;
 }
@@ -54,33 +76,47 @@ int radio_hw_detect_version(void)
 		return SBITX_V2;
 }
 
-/* ---- Low-pass filter band switching -------------------------------------- */
+/* ---- Low-pass filter band switching --------------------------------------
+ *
+ * prev_lpf now tracks the selected BCM pin number (0 meaning "none", for
+ * a frequency at or above 30MHz that no band below covers) rather than a
+ * wiringPi pin number - same sentinel convention as before, just in the
+ * new numbering. Unlike the old digitalWrite(lpf, HIGH) - which could be
+ * (and, for out-of-range frequencies, was) called with pin 0 as a
+ * harmless no-op against wiringPi's own numbering - there's no line
+ * handle behind BCM pin 0 here, so the out-of-range case is now handled
+ * explicitly instead of relying on that incidental behavior.
+ */
 
 static int prev_lpf = -1;
 void set_lpf_40mhz(int frequency)
 {
-	int lpf = 0;
+	int lpf = 0;        // BCM pin number, for the log line - 0 = none selected
+	int line = -1;      // matching line handle to drive high, if any
 
-	if (frequency < 5500000)
-		lpf = LPF_D;
-	else if (frequency < 10500000)
-		lpf = LPF_C;
-	else if (frequency < 18500000)
-		lpf = LPF_B;
-	else if (frequency < 30000000)
-		lpf = LPF_A;
+	if (frequency < 5500000) {
+		lpf = LPF_D; line = line_lpf_d;
+	} else if (frequency < 10500000) {
+		lpf = LPF_C; line = line_lpf_c;
+	} else if (frequency < 18500000) {
+		lpf = LPF_B; line = line_lpf_b;
+	} else if (frequency < 30000000) {
+		lpf = LPF_A; line = line_lpf_a;
+	}
 
 	if (lpf == prev_lpf)
 	{
 		return;
 	}
 
-	digitalWrite(LPF_A, LOW);
-	digitalWrite(LPF_B, LOW);
-	digitalWrite(LPF_C, LOW);
-	digitalWrite(LPF_D, LOW);
+	gpio_write(line_lpf_a, 0);
+	gpio_write(line_lpf_b, 0);
+	gpio_write(line_lpf_c, 0);
+	gpio_write(line_lpf_d, 0);
 
-	digitalWrite(lpf, HIGH);
+	if (line >= 0)
+		gpio_write(line, 1);
+
 	prev_lpf = lpf;
 	printf("LPF: selected pin %d for %d Hz\n", lpf, frequency);
 }
@@ -89,17 +125,17 @@ void set_lpf_40mhz(int frequency)
 
 void radio_hw_set_ptt(int on)
 {
-	digitalWrite(EXT_PTT, on ? HIGH : LOW);
+	gpio_write(line_ext_ptt, on ? 1 : 0);
 }
 
 void radio_hw_set_tx_relay(int on)
 {
-	digitalWrite(TX_LINE, on ? HIGH : LOW);
+	gpio_write(line_tx_line, on ? 1 : 0);
 }
 
 int radio_hw_key_down(void)
 {
-	return digitalRead(CW_KEY) == LOW;
+	return gpio_read(line_cw_key) == 0;
 }
 
 /* ---- INA260 power monitor ------------------------------------------------ */
