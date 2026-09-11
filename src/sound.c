@@ -27,15 +27,37 @@
 #define PERIOD_FRAMES    1024     /* frames per period (matches old cfg) */
 #define MAX_FRAMES       4096
 
-// WM8731 "Line" input level (ALSA percent, 0-100) - the one analog gain
-// stage ahead of the ADC in the whole RX chain (no RF preamp on this
-// board). Not bench-verified against real signal levels yet - see
-// docs/dsp_design_notes/rx_gain_and_level_calibration.md. Pulled out to
-// its own named constant (rather than a bare literal in
-// setup_audio_codec() below) specifically so a bench sweep - try 80,
-// rebuild, test; try a different value, rebuild, test - only ever
-// touches this one line.
-#define RX_LINE_GAIN_PERCENT 80
+// WM8731 "Line" input path enable. Turned out NOT to be a gain control
+// at all, despite the old comment here claiming it was: `amixer -c 0
+// sget 'Line'` (bench-checked 2026-09) shows Capabilities: cswitch only
+// - no volume, no dB range. sound_mixer()'s own logic (below) checks
+// for a capture switch before a capture volume, so any nonzero value
+// passed here just calls snd_mixer_selem_set_capture_switch_all() -
+// "on" - regardless of what number it is. Kept as a named constant
+// anyway, purely so it reads as a deliberate boolean rather than a
+// stray literal; see RX_CAPTURE_GAIN_PERCENT below for the control that
+// actually is a gain stage.
+#define RX_LINE_INPUT_ON 1
+
+// WM8731 'Capture' level - the real analog gain stage ahead of the ADC
+// in the whole RX chain (no RF preamp on this board), discovered by
+// bench-checking every control `amixer -c 0 scontrols` lists rather
+// than trusting the old "Line" assumption above. `amixer -c 0 sget
+// 'Capture'` (2026-09) confirms Capabilities: cvolume, raw range 0-31,
+// which is the WM8731's line-input attenuator per its datasheet
+// (-34.5dB to +12dB in 1.5dB steps) - `Input Mux` was independently
+// confirmed routing 'Line In' (not 'Mic') into this same stage. Before
+// this fix, minibitx never touched this control at all - it sat at
+// whatever the kernel driver happened to default to on boot (observed:
+// raw step 15, -12.00dB), not a deliberate choice. `sound_mixer()`
+// (below) maps this ALSA percent (0-100) onto the control's real 0-31
+// range via integer division (`percent * 31 / 100`); 50 reproduces that
+// same -12dB default exactly (50*31/100 truncates to 15) as a known,
+// code-controlled starting point for the bench sweep in
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md - not yet a
+// calibrated value in its own right, just "the same thing it was
+// already doing, but on purpose now."
+#define RX_CAPTURE_GAIN_PERCENT 50
 
 /* ------------------------------------------------------------------ */
 /*  TX sample scaling - see hw_settings.h for the per-band 'scale'      */
@@ -141,8 +163,9 @@ void sound_mixer(char *card_name, char *element, int make_on)
 /*  Codec hardware setup - barebones WM8731 init                      */
 /* ------------------------------------------------------------------ */
 void setup_audio_codec(void) {
-  sound_mixer("hw:0", "Input Mux", 0);
-  sound_mixer("hw:0", "Line", RX_LINE_GAIN_PERCENT);
+  sound_mixer("hw:0", "Input Mux", 0);       // 'Line In' (bench-confirmed - see RX_CAPTURE_GAIN_PERCENT's comment above)
+  sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON); // just un-mutes the line path - see comment above
+  sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain stage
   sound_mixer("hw:0", "Mic", 0);
   sound_mixer("hw:0", "Master", 0); // Mute local speaker
   sound_mixer("hw:0", "Output Mixer HiFi", 1);
@@ -304,17 +327,19 @@ static void xrun_note(struct xrun_tracker *t, const char *label)
 #ifdef RX_GAIN_DIAG
 // Temporary bench diagnostic for
 // docs/dsp_design_notes/rx_gain_and_level_calibration.md - not compiled
-// into normal builds (build with `make CFLAGS+=-DRX_GAIN_DIAG` to
+// into normal builds (build with `make CPPFLAGS=-DRX_GAIN_DIAG` to
 // enable it for a bench session, plain `make` otherwise). Tracks the
 // raw ADC sample - "rf" below, before any digital mixing or filtering -
 // against full scale, since that's the one signal in the whole chain
-// that reflects the WM8731 "Line" gain (RX_LINE_GAIN_PERCENT) directly,
-// independent of anything downstream (IQ mixing, the anti-alias
-// filter, decimation, or either output consumer's own scaling) - see
-// that doc's Caveat 2. Reports peak and RMS in dBFS once per ~1 second
+// that reflects the WM8731 'Capture' gain (RX_CAPTURE_GAIN_PERCENT)
+// directly, independent of anything downstream (IQ mixing, the
+// anti-alias filter, decimation, or either output consumer's own
+// scaling) - see that doc's Caveat 2 (and RX_CAPTURE_GAIN_PERCENT's own
+// comment above for why this isn't 'Line', despite the name being the
+// more obvious guess). Reports peak and RMS in dBFS once per ~1 second
 // of audio (96000 samples at this file's fixed 96kHz capture rate), so
 // a bench session produces one line per second, tagged with the
-// currently tuned frequency and Line setting so a captured log is
+// currently tuned frequency and Capture setting so a captured log is
 // self-describing without needing separate notes.
 #define RXDIAG_WINDOW_SAMPLES 96000
 static double rxdiag_peak = 0.0;
@@ -333,8 +358,8 @@ static void rxdiag_sample(double rf) {
         // the log numeric and greppable rather than printing "-inf".
         double peak_dbfs = 20.0 * log10(rxdiag_peak > 1e-12 ? rxdiag_peak : 1e-12);
         double rms_dbfs  = 20.0 * log10(rms > 1e-12 ? rms : 1e-12);
-        printf("rxgain: freq=%d line=%d%% peak=%.1fdBFS rms=%.1fdBFS%s\n",
-               freq_hdr, RX_LINE_GAIN_PERCENT, peak_dbfs, rms_dbfs,
+        printf("rxgain: freq=%d capture=%d%% peak=%.1fdBFS rms=%.1fdBFS%s\n",
+               freq_hdr, RX_CAPTURE_GAIN_PERCENT, peak_dbfs, rms_dbfs,
                rxdiag_peak >= 0.999 ? "  *** CLIPPING ***" : "");
         rxdiag_peak = 0.0;
         rxdiag_sumsq = 0.0;
