@@ -61,7 +61,7 @@ make
 ```
 
 Produces a single `minibitx` binary from the sources in `src/`. Requires
-`libasound`, `libwiringPi`, and the usual `pthread`/`libm`/`libdl` (see
+`libasound`, and the usual `pthread`/`libm`/`libdl` (see
 `Makefile` for the exact link line).
 
 ## Running
