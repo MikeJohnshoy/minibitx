@@ -151,8 +151,15 @@ The si5351 generates both mixer LOs used in the RX chain (see
 [`02_rx_processing_pipeline.md`](02_rx_processing_pipeline.md) for what
 each clock actually does). `si5351bx_init()` (`si5351v2.c`) powers down
 all three clocks and brings up the I2C connection it needs; `main()`
-then explicitly starts `clk1` at `bfo_freq` — the one clock nothing else
-in minibitx ever touches again — before calling `si5351_reset()`.
+then explicitly starts `clk1` at its RX value
+(`xtal_filter_center + RX_IF_FREQ_HZ`) before calling `si5351_reset()`.
+Unlike `clk2` (which `radio_tune_to()` sweeps constantly) or the older
+single-value scheme this replaced, `clk1` isn't touched again until the
+first TX burst — `radio_tx_apply()` (`radio.c`) retunes it to `bfo_freq`
+for the duration of TX and restores this RX value the moment TX ends;
+see [`03_tx_processing_pipeline.md`](03_tx_processing_pipeline.md) and
+[`dsp_design_notes/antialias_filter_design.md`](dsp_design_notes/antialias_filter_design.md)
+§3 for why RX and TX need different `clk1` values in the first place.
 
 The si5351 sits on I2C bus 22 (`SI5351_I2C_BUS` in `si5351v2.c`), sharing
 the physical bus with the board's RTC via the `i2c-rtc-gpio` device tree
