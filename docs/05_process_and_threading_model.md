@@ -41,6 +41,6 @@ Status: stub.
   which report a freq/PTT change at the moment it happens rather than a
   point-in-time snapshot.
 - Failure handling at startup: which subsystems are fatal if they fail
-  to come up (GPIO/wiringPi, HPSDR socket bind, audio capture) versus
+  to come up (GPIO, HPSDR socket bind, audio capture) versus
   which are best-effort and allowed to be absent (Hamlib/rigctld, the
   USB gadget, the INA260 power monitor).
