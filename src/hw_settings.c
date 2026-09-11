@@ -2,8 +2,11 @@
 //
 // Reader for data/hw_settings.ini. That file is the same file that sbitx
 // uses, so 'bfo_freq' and the per-band 'scale' calibration table carry
-// over to minibitx. If hw_settings.ini is not found, minibitx just uses
-// its own default settings.
+// over to minibitx. 'xtal_filter_center' is new here (not read by real
+// sbitx), added alongside bfo_freq for the same reason - both are
+// board-specific measurements, not source-code constants. If
+// hw_settings.ini is not found, minibitx just uses its own default
+// settings.
 
 #include "hw_settings.h"
 #include "radio.h"
@@ -70,6 +73,10 @@ void hw_settings_load(void) {
       if (!strcmp(key, "bfo_freq")) {
         bfo_freq = (int)value;
         printf("init: bfo_freq loaded from %s: %d Hz\n", HW_SETTINGS_PATH, bfo_freq);
+      } else if (!strcmp(key, "xtal_filter_center")) {
+        xtal_filter_center = (int)value;
+        printf("init: xtal_filter_center loaded from %s: %d Hz\n",
+               HW_SETTINGS_PATH, xtal_filter_center);
       }
       // ssb_val and any other top-level keys: read past, not applied yet.
     } else if (section == HW_SECTION_TX_BAND && tx_band_scale_count < HW_MAX_TX_BANDS) {
