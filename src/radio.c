@@ -4,9 +4,9 @@
 #include "radio_hw.h"
 #include "si5351.h"
 #include "sound.h"
-#include "cw.h"         // CW_PITCH_HZ - TX clk2 correction, see radio_tx_apply()
+#include "cw.h"
 #include <stdio.h>
-#include <unistd.h>     // usleep() - relay-settling time, not GPIO access
+#include <unistd.h>
 #include <pthread.h>
 
 int freq_hdr = 7030000;
@@ -21,7 +21,7 @@ int in_tx = 0;
 // antialias_filter_design.md). The actual crystal filter center varies
 // across sbitx/zbitx boards (measured data: ~40.0124 MHz on one board,
 // ~22.6kHz below this default) - this default (40035000) was arrived at
-// by ear on one particular board, not from a measurement of it. Users
+// experimentally on one particular board, not from a measurement of it. Users
 // can set their own bfo_freq in hw_settings.ini if RX sounds off-center
 // on their hardware - but TX_IF_OFFSET_HZ (cw.c) was derived FROM the
 // gap between this default and one board's measured filter center, so
