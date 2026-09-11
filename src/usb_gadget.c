@@ -528,12 +528,26 @@ static void *uac_writer_thread(void *arg) {
     // fully-supported, expected way to run this daemon (see the comment
     // below) - which is exactly the kind of benign-state-logged-as-an-
     // event noise the CAT AC/FA/FB polling fix (usb_gadget_os_setup.md)
-    // was about eliminating elsewhere. Starting pessimistic means a
-    // cold boot with nothing plugged in logs nothing at all from this
-    // thread; the log now fires only on genuine transitions - a host
-    // that was draining and then goes away, or a host that starts
-    // draining (first time or again) after not doing so.
+    // was about eliminating elsewhere.
+    //
+    // That alone isn't quite enough, though (bench-observed 2026-09):
+    // even with nothing draining the gadget, the very first write(s)
+    // after opening a fresh capture-direction PCM can still report
+    // success - the ring buffer starts empty, and ALSA has no way to
+    // know a write "succeeded" only because there was room in an
+    // UAC_PERIODS-deep buffer versus because something is actually
+    // pulling data out the other end. So a single success right after
+    // startup isn't trustworthy evidence of a host either - only a run
+    // of *more* successes than the buffer could have absorbed for free
+    // actually proves something is draining it (see success_streak
+    // below).
     unsigned err_streak = 0;
+    unsigned success_streak = 0;
+    unsigned pending_err_streak = 0;  // err_streak snapshotted at the start
+                                       // of the current run of successes,
+                                       // for the "draining again after N
+                                       // failed writes" message once that
+                                       // run is confirmed real (below)
     int host_was_draining = 0;
 
     while (uac_writer_running) {
@@ -640,26 +654,46 @@ static void *uac_writer_thread(void *arg) {
                         snd_strerror((int)written));
                 host_was_draining = 0;
             }
+            success_streak = 0;
             err_streak++;
             snd_pcm_recover(uac_pcm_handle, (int)written, 1 /*silent*/);
         } else {
-            if (!host_was_draining) {
-                // err_streak == 0 here means this is the very first
-                // write this thread has ever attempted (host was
-                // already attached and draining before we even got
-                // going) - "draining again ... after 0 failed writes"
-                // would be a nonsensical thing to say about a session
-                // that never failed a write in the first place.
-                if (err_streak > 0) {
+            if (success_streak == 0) {
+                // First success of a new run - remember how many writes
+                // failed right before it, for the "draining again after
+                // N failed writes" message below, once/if this run turns
+                // out to be real (not just the buffer swallowing a few
+                // writes for free with nothing on the other end - see
+                // the success_streak threshold below). err_streak itself
+                // gets reset right away regardless, since the backoff
+                // pacing above needs to see "no current failure streak"
+                // as soon as a write succeeds.
+                pending_err_streak = err_streak;
+            }
+            success_streak++;
+            err_streak = 0;
+
+            // Don't trust a lone successful write (or a short run of
+            // them) as proof a host is actually draining the gadget:
+            // the ring buffer is UAC_PERIODS periods deep, so up to that
+            // many writes can succeed purely because there's room in an
+            // empty buffer, even with nothing reading on the other end
+            // (bench-observed 2026-09: a fresh gadget bind with no USB
+            // cable attached still reported one successful write before
+            // the real, sustained failure). Only once we've written more
+            // consecutive successful periods than the buffer can absorb
+            // for free does a further success actually mean something is
+            // draining it.
+            if (!host_was_draining && success_streak > UAC_PERIODS) {
+                if (pending_err_streak > 0) {
                     fprintf(stderr,
                             "uac: USB host draining again after %u failed write(s)\n",
-                            err_streak);
+                            pending_err_streak);
                 } else {
                     fprintf(stderr, "uac: USB host draining the gadget\n");
                 }
                 host_was_draining = 1;
             }
-            err_streak = 0;
         }
     }
 
