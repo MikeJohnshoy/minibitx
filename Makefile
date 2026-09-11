@@ -6,9 +6,10 @@ CC      := gcc
 # that's ever needed. It's what lets antialias.c's branch-free FIR loop
 # (see antialias.c) actually vectorize instead of just being eligible to.
 CFLAGS  := -O3 -march=native -Wall -Wextra -std=gnu11
-LDFLAGS := -lm -lasound -lpthread -ldl -lwiringPi
+LDFLAGS := -lm -lasound -lpthread -ldl
 SRC := src/minibitx.c src/radio.c src/radio_hw.c src/hpsdr_p1.c src/usb_gadget.c src/status.c src/i2c.c \
-     src/si5351v2.c src/sound.c src/vfo.c src/hamlib.c src/hw_settings.c src/antialias.c src/decim48k.c src/cw.c
+     src/si5351v2.c src/sound.c src/vfo.c src/hamlib.c src/hw_settings.c src/antialias.c src/decim48k.c src/cw.c \
+     src/gpio.c
 OBJ := $(SRC:.c=.o)
 
 all: minibitx
@@ -25,6 +26,13 @@ minibitx: $(OBJ)
 	#    ordinary user gets "Permission denied" creating the gadget root
 	#    even though the directory itself exists and dwc2/libcomposite
 	#    are loaded correctly.
+	# Neither capability is about GPIO: gpio.c (src/gpio.c) opens
+	# /dev/gpiochip0 directly, which on Raspberry Pi OS is group "gpio",
+	# mode 0660 by udev default - the same group membership wiringPi
+	# already required for its own /dev/gpiomem access, not a new
+	# permission this rewrite introduces. If GPIO init ever fails with
+	# "Permission denied" where it didn't before, check `groups` for the
+	# user running minibitx, not this setcap line.
 	# A fresh binary has neither capability - setcap has to be reapplied
 	# after every relink, since it's a filesystem attribute on this
 	# specific binary, not something that carries over. Leading '-' so a
