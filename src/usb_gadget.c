@@ -519,8 +519,22 @@ static void *uac_writer_thread(void *arg) {
     // to log state *transitions* ("no host" / "host back") once each,
     // rather than repeating on every attempt - see the write-error
     // handling at the bottom of the loop for both.
+    //
+    // Starts pessimistic (0 = "not draining yet"), not optimistic. This
+    // thread's very first write happens before any USB host has had a
+    // chance to attach, so an optimistic start meant the "no host
+    // draining the gadget yet" transition log fired on essentially
+    // every single cold boot with no cable connected - the normal,
+    // fully-supported, expected way to run this daemon (see the comment
+    // below) - which is exactly the kind of benign-state-logged-as-an-
+    // event noise the CAT AC/FA/FB polling fix (usb_gadget_os_setup.md)
+    // was about eliminating elsewhere. Starting pessimistic means a
+    // cold boot with nothing plugged in logs nothing at all from this
+    // thread; the log now fires only on genuine transitions - a host
+    // that was draining and then goes away, or a host that starts
+    // draining (first time or again) after not doing so.
     unsigned err_streak = 0;
-    int host_was_draining = 1;   // optimistic initial assumption
+    int host_was_draining = 0;
 
     while (uac_writer_running) {
         unsigned head = atomic_load_explicit(&uac_q_head, memory_order_acquire);
@@ -630,9 +644,19 @@ static void *uac_writer_thread(void *arg) {
             snd_pcm_recover(uac_pcm_handle, (int)written, 1 /*silent*/);
         } else {
             if (!host_was_draining) {
-                fprintf(stderr,
-                        "uac: USB host draining again after %u failed write(s)\n",
-                        err_streak);
+                // err_streak == 0 here means this is the very first
+                // write this thread has ever attempted (host was
+                // already attached and draining before we even got
+                // going) - "draining again ... after 0 failed writes"
+                // would be a nonsensical thing to say about a session
+                // that never failed a write in the first place.
+                if (err_streak > 0) {
+                    fprintf(stderr,
+                            "uac: USB host draining again after %u failed write(s)\n",
+                            err_streak);
+                } else {
+                    fprintf(stderr, "uac: USB host draining the gadget\n");
+                }
                 host_was_draining = 1;
             }
             err_streak = 0;
