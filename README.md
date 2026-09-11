@@ -51,7 +51,6 @@ minibitx is quite small - most of the code is in the interface software that pas
 
 TO DO: 
 
-0. complete removal of wiringPi (setting LPF, T/R and PTT)
 1. simple/efficient/low-overhead packet interface for IQ in and out
 2. study gain setting for A/D to use more of dynamic range
 
