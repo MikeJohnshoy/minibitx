@@ -204,6 +204,15 @@ never anything hardware-facing:
   `calibrate_band_power()`, compensating for PA gain rolling off
   toward 10m), reused here as a starting point rather than derived
   from scratch.
+- **`TX_SAMPLE_HEADROOM`** (`sound.c`) — anchors the per-band scale
+  table above to a PCM amplitude: set so the reference band (40m,
+  `HW_DEFAULT_TX_SCALE`) reproduces exactly the same output level the
+  old flat, unscaled `1e9` constant it replaced did, so that band's
+  already-tested level doesn't move. Other bands scale up/down from
+  there following the table's real per-band ratios (roughly 14x across
+  the table, 80m to 10m) — `TX_SAMPLE_CLAMP` below exists specifically
+  because that spread can call for several times more amplitude than
+  40m on the high end.
 - **`TX_GAIN_CORRECTION`** — a flat multiplier on top of the above, now
   **0.045**, bench-verified against a wattmeter (40m/7.020MHz: 5.1W,
   matching real sbitx's own 4.8W measured on the same board at the same
