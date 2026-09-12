@@ -7,7 +7,7 @@ minibitx can now be compiled and run on the Rpi-4 in the sbitx to demonstrate an
 Mature, highly developed external Software Defined Radio (SDR) applications are being used with minibitx to find the upper limit of the sbitx processing chain.
 Lessons learned in this project can be folded back into sbitx or used in other projects.
 
-minibitx currently has the receive processing pipeline shown below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely "baked into" the sbitx hardware.
+minibitx currently has the receive processing pipeline shown below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely dictated by the sbitx hardware.
 
 ```
   Antenna
@@ -28,9 +28,9 @@ minibitx currently has the receive processing pipeline shown below in working or
   Low IF, centered at RX_IF_HZ (24000 Hz)
      |
      v
-  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is settable?
-     |            need to examine how this gain setting affects dynamic range
-     v            (used as IF gain in sbitx?)
+  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is fixed,
+     |            set experimentally
+     v
   Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
      |            sound.c: sound_process() calls vfo_read_iq() per sample
      v            converts real value A/D output to analytic I&Q at baseband
