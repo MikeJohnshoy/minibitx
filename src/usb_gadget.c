@@ -515,8 +515,7 @@ static void *uac_writer_thread(void *arg) {
       // docs/dsp_design_notes/usb_gadget_OS_setup.md §11.
       if (host_was_draining) {
         fprintf(stderr,
-                "uac: no USB host draining the gadget yet (%s) - "
-                "will keep retrying quietly in the background\n",
+                "uac: no USB data user (%s)\n",
                 snd_strerror((int)written));
         host_was_draining = 0;
       }
