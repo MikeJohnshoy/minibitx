@@ -39,7 +39,7 @@ goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_out
   Low IF, centered at RX_IF_HZ (24000 Hz)
      |
      v
-  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is settable?
+  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain set experimentally
      |  
      v
   Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
