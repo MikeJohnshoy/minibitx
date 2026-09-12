@@ -93,6 +93,23 @@ protocol. Like every other control surface here, `cat_init()` failing
 gadget failed to bind) is not fatal — minibitx keeps running on whatever
 subset of control surfaces actually came up.
 
+Unlike Hamlib clients such as WSJT-X, FLRig has no async push mechanism
+for rig status — it actively polls every "get" query (`FA`, `FB`, `MD`,
+`ID`, ...) on every UI cycle to keep its own display current,
+bench-confirmed at several times a second regardless of whether anything
+changed. Logging every one of those floods the console with
+near-identical repeated lines — fixed in `cat_handle_command()`
+(`usb_gadget.c`) with `cat_log_get()`: a get's console line only prints
+when the reply actually differs from the last reply of the same kind,
+the same "don't log unchanged, routine state" principle already applied
+to `uac_writer_thread()`'s backoff logging and `hpsdr_p1.c`'s IQ pacer
+thread. A *set* (an actual operator action, not a routine poll) always
+logs. `AC` (antenna tuner control) is part of FLRig's standard status
+poll too, but minibitx has no tuner to report on — recognized and
+silently ignored rather than falling into the generic "unrecognized"
+branch, which would otherwise log this benign, expected query on every
+poll forever.
+
 WSJT-X needs no changes and keeps using the Hamlib server above; this is
 purely additive.
 
