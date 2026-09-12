@@ -1,15 +1,18 @@
 # RX Gain and Level Calibration: Using the 24 Bits Well
 
-Status: a temporary diagnostic build exists (§6) implementing the
-noise-floor/strong-signal check from §4; one quiet-band capture has been
-taken on 40m (§6). Along the way, bench `amixer` inspection (2026-09)
-found that the analog gain stage this doc originally pointed at
+Status: done. The noise-floor/strong-signal check from §4 has been run
+(dummy-load and on-air scans across 80m-10m, plus an SDR Console cross-
+check on 40m FT8), and `RX_CAPTURE_GAIN_PERCENT` has been raised from
+the kernel driver's accidental default to a deliberately chosen 70 - see
+§6 for the data and reasoning. The temporary per-second bench diagnostic
+that produced that data has been retired in favor of a permanent,
+always-compiled clip guard (§7) - a lightweight safety net rather than a
+recording instrument. Along the way, bench `amixer` inspection (2026-09)
+also found that the analog gain stage this doc originally pointed at
 (`'Line'`) is actually just an on/off switch, not a gain control - see
-§3 for the corrected story and the resulting code fix
-(`RX_LINE_INPUT_ON` / `RX_CAPTURE_GAIN_PERCENT` in `sound.c`). This
-still records the original design discussion (2026-09) about how to
-approach setting/verifying RX gain, so the reasoning and the right order
-of operations aren't lost.
+§3 for that corrected story. This still records the original design
+discussion (2026-09) about how to approach setting/verifying RX gain, so
+the reasoning and the right order of operations aren't lost.
 
 ## 1. Background
 
@@ -87,21 +90,19 @@ explicitly:
 ```c
 sound_mixer("hw:0", "Input Mux", 0);
 sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON);        // on/off switch, not a gain
-sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 50% of max, by default
+sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 70% of max, by default
 sound_mixer("hw:0", "Mic", 0);
 ```
 
-`RX_CAPTURE_GAIN_PERCENT` (`sound.c`) is deliberately set to 50, which
-`sound_mixer()`'s percent-to-raw conversion (`percent * max / 100`,
-integer division) turns into exactly `50*31/100 = 15` - the same step
-the driver was defaulting to, chosen so the diagnostic data already
-captured against that default (§6) stays valid. It has no other
-documented derivation behind it - it reads as a reasonable-sounding
-default, not a bench-verified operating point the way
-`TX_GAIN_CORRECTION` (0.045) was wattmeter-calibrated on the TX side
-(`tx_power_calibration.md`). If that setting is wrong in either
-direction, any digital peak data collected on top of it is measuring
-the consequences of that choice, not the radio itself:
+`RX_CAPTURE_GAIN_PERCENT` (`sound.c`) is now 70 - raised from an initial
+50 (chosen only to reproduce the kernel driver's accidental -12dB boot
+default while the bench study was still running) once §6's data showed
+real headroom to spare. It's a bench-informed choice, not yet a
+wattmeter-grade calibration the way `TX_GAIN_CORRECTION` (0.045) is on
+the TX side (`tx_power_calibration.md`) - see §6 for exactly what data
+backs it and what it doesn't yet cover. If this setting is wrong in
+either direction, any digital peak data collected on top of it is
+measuring the consequences of that choice, not the radio itself:
 
 - **Too hot**, and a strong signal or a busy band clips inside the
   WM8731's own ADC before any digital sample exists to log. No amount
@@ -128,7 +129,7 @@ Line-in setting first, independently of it:
    contest weekend, or a signal generator if one's on hand) and check
    where its peaks land:
    - Regularly slamming into full-scale codes → `RX_CAPTURE_GAIN_PERCENT`
-     (50) needs to come down before anything else here is worth
+     (70) needs to come down before anything else here is worth
      trusting.
    - Never getting anywhere close to full-scale even on the loudest
      signal found → there's room to raise it and buy back real bits.
@@ -150,9 +151,12 @@ quantization floor," not "hit every last bit."
   all if the analog stage alone turns out sufficient across all bands)
   is an open question - this doc only covers how to validate the
   starting point and gather trustworthy data, not what to do with it.
-- Whether `RX_CAPTURE_GAIN_PERCENT` itself needs to change from 50 -
-  that's exactly what §6's diagnostic build and the bench session it
-  enables are for.
+- Whether `RX_CAPTURE_GAIN_PERCENT` (now 70) needs to move again -
+  §6/§7 cover the data behind today's value and the permanent clip
+  guard that watches for a future signal proving it wrong, but the
+  underlying number hasn't been re-checked against a genuinely strong
+  band opening yet (see §6's caveat about what this data does and
+  doesn't cover).
 - Whether this analog setting should ever become runtime-adjustable
   (a live CAT/rigctl "RF gain" control) rather than a fixed,
   bench-calibrated constant re-set at compile time, the way
@@ -164,59 +168,73 @@ quantization floor," not "hit every last bit."
   differences ever turn out to matter. Not a final decision, just the
   current lean.
 
-## 6. The diagnostic build
+## 6. Bench results and the chosen gain
 
-`sound.c` has a bench-only instrumentation path, compiled in only with
-`-DRX_GAIN_DIAG`:
+The bench study used a temporary per-second diagnostic (since retired -
+see §7) that tapped the raw ADC sample (`rf` in `sound_process()`,
+before any digital mixing/filtering - see Caveat 2 above for why that's
+the right point to measure) and printed peak/RMS dBFS once per second,
+tagged with the tuned frequency and `Capture` setting.
+
+At the kernel driver's accidental default (raw step 15, -12dB, what
+`RX_CAPTURE_GAIN_PERCENT=50` had been deliberately set to reproduce
+during the study - see §3), a scan across all HF bands (80m through
+10m) found:
+
+- **Dummy load (noise floor)**: remarkably consistent across every band
+  - RMS -74.5 to -76.4dBFS, peak -59 to -62dBFS - with a handful of
+    isolated spikes to -53 to -54dBFS on 10m/20m/40m that read as
+    internally-generated noise (GPIO/SPI/PWM switching harmonics are
+    the usual suspect on a Pi-hosted radio) rather than anything
+    band-specific, since there's no antenna signal present to explain
+    them.
+- **Real antenna, FT8 sub-bands**: 20m and 10m came back indistinguishable
+  from the dummy-load floor (those bands were simply quiet at capture
+  time). 80m ran a bit hotter (RMS avg -72.7dBFS, peak avg -57.4dBFS).
+  40m was the liveliest by far - RMS averaging -58.8dBFS with peaks
+  averaging -46.3dBFS and the single loudest reading at **-41.7dBFS**,
+  ~40dB below full-scale.
+- **Cross-check via SDR Console** on that same 40m FT8 activity: FT8
+  signals peaking around -65dBm rising out of a -110dBm noise floor (a
+  45dB spread) - consistent with the dBFS data above, though SDR
+  Console's absolute dBm scale is itself uncalibrated against a real RF
+  reference here (Caveat 1), so the *spread* is the trustworthy number,
+  not the specific dBm values.
+
+40dB of unused headroom below full-scale, even on the busiest band
+found, is well past "comfortably under full-scale" (§4) - the
+too-conservative failure mode, not the too-hot one. `RX_CAPTURE_GAIN_PERCENT`
+was raised from 50 to **70** (raw step 21, ~-3.0dB - a +9dB increase),
+which by the same logic should land that -41.7dBFS peak around -33dBFS:
+still well clear of clipping on everything observed, while using
+noticeably more of the available range.
+
+**What this data doesn't cover yet**: every band scan above happened to
+catch fairly ordinary conditions - even 40m's "liveliest" reading was
+described at the time as not necessarily the loudest realistic case
+(a strong local station, a contest weekend, or a real band opening
+could peak meaningfully higher). §4's strong-signal check is worth
+re-running at 70% specifically looking for that louder case before
+treating 70 as settled rather than "settled against what's been seen
+so far." §7's clip guard is the safety net for whatever that check
+finds.
+
+## 7. The permanent clip guard
+
+The per-second bench diagnostic above did its job and has been removed;
+what replaced it in `sound.c` is a much smaller, always-compiled check
+rather than a bench recorder - no periodic logging, no RMS
+accumulation, nothing gated behind a build flag. It taps the same raw
+`rf` sample and says something only on the rising edge of an actual
+clipping episode:
 
 ```
-make CPPFLAGS=-DRX_GAIN_DIAG
+sound: *** CLIPPING *** freq=7074000 capture=70% - RF front end is overdriving the ADC, consider lowering RX_CAPTURE_GAIN_PERCENT
 ```
 
-(`CPPFLAGS`, not `CFLAGS` - a plain `make CFLAGS+=...` on the command
-line replaces this Makefile's own `CFLAGS` line entirely rather than
-adding to it, silently dropping `-O3 -march=native -Wall -Wextra
--std=gnu11` in the process; `CPPFLAGS` is untouched by the Makefile, so
-passing it this way only adds the diagnostic define.) Rebuild plain
-`make` afterward to return to a normal binary - the two shouldn't be
-mixed up, since the diagnostic build's `printf`s are not something to
-leave running in normal operation.
-
-It taps the raw ADC sample (`rf` in `sound_process()`, before any
-digital mixing/filtering - see Caveat 2 above for why that's the right
-point to measure), and once per second of audio (96000 samples at the
-fixed 96kHz capture rate) prints one line:
-
-```
-rxgain: freq=7030000 capture=50% peak=-8.3dBFS rms=-42.1dBFS
-```
-
-- `freq` and `capture` are just the currently tuned dial frequency and
-  the compiled-in `RX_CAPTURE_GAIN_PERCENT`, included so a captured log
-  is self-describing without needing separate notes.
-- `peak`/`rms` are in dBFS (0 = full-scale); a window that ever actually
-  hits full-scale gets a trailing `*** CLIPPING ***` marker so it's
-  unambiguous when scanning a captured log.
-- Redirect/tee console output to a file per test run to build up a
-  record, e.g. `./minibitx | tee rxgain_20m_dummyload_line80.log` -
-  naming each file by band/condition/gain setting keeps a multi-run
-  sweep straightforward to compare afterward.
-
-Suggested first session, matching the two-sided check in §4: on a dummy
-load (no antenna signal - the noise-floor check), tune so the FT8
-sub-band sits at the center of the IF passband rather than its edge (so
-the anti-alias filter's full margin is available), and let it run for a
-minute or so on 20m, then repeat on 40m - all at today's default
-`RX_CAPTURE_GAIN_PERCENT` (50) as the baseline before trying anything
-else. Follow with the strong-signal side of the check (real antenna,
-active band) the same way, same two bands, same starting gain, before
-considering whether 50 needs to move.
-
-The quiet-band capture already collected on 40m (2026-09, `'Line'`
-believed at the time to be the gain control, actually at its on/off
-default while `'Capture'` sat at the kernel driver's undocumented boot
-default of step 15/48%/-12dB) remains directly comparable to future
-runs at `RX_CAPTURE_GAIN_PERCENT=50`, since that constant was chosen
-specifically to reproduce that exact same -12dB operating point on
-purpose rather than by driver accident. It doesn't need to be redone -
-it can stand as the first data point in the sweep.
+Per-sample cost is one `fabs()` and one comparison - negligible next to
+the mixing and FIR-filter arithmetic `sound_process()` already does for
+every sample, so it costs nothing measurable to leave running in every
+normal build, including on the Pi Zero 2W baseline. If it ever prints
+during normal operation, that's the signal to come back to this doc and
+reconsider `RX_CAPTURE_GAIN_PERCENT`.
