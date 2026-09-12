@@ -238,3 +238,22 @@ every sample, so it costs nothing measurable to leave running in every
 normal build, including on the Pi Zero 2W baseline. If it ever prints
 during normal operation, that's the signal to come back to this doc and
 reconsider `RX_CAPTURE_GAIN_PERCENT`.
+
+## 8. Muted during TX
+
+Comparing notes against `github.com/drexjj/sbitx` (a GUI-based sbitx
+fork sharing this same WM8731 hardware) turned up one more thing worth
+carrying over: its `tr_switch()` zeroes the `'Capture'` control the
+moment TX begins and only restores it once the T/R relay has settled
+back to RX, protecting the ADC/DSP chain from whatever bleeds into the
+RX input during TX (relay leakage, PA harmonics, shared-ground
+crosstalk). minibitx didn't do this - `RX_CAPTURE_GAIN_PERCENT` just sat
+untouched through every TX/RX transition - so it now does too, via
+`sound_set_rx_capture()` (`sound.c`), called from `radio_tx_apply()`
+(`radio.c`) at the same two points sbitx does: muted first on the way
+into TX (before PTT/the relay/either clock even changes), restored last
+on the way back to RX (after the relay and clocks are already back).
+See
+[`03_tx_processing_pipeline.md`](../03_tx_processing_pipeline.md)
+for where that sits in the TX sequence. Pure safety measure - no effect
+on RX sensitivity or TX power.
