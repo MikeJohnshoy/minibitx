@@ -46,18 +46,27 @@
 // 'Capture'` (2026-09) confirms Capabilities: cvolume, raw range 0-31,
 // which is the WM8731's line-input attenuator per its datasheet
 // (-34.5dB to +12dB in 1.5dB steps) - `Input Mux` was independently
-// confirmed routing 'Line In' (not 'Mic') into this same stage. Before
-// this fix, minibitx never touched this control at all - it sat at
-// whatever the kernel driver happened to default to on boot (observed:
-// raw step 15, -12.00dB), not a deliberate choice. `sound_mixer()`
-// (below) maps this ALSA percent (0-100) onto the control's real 0-31
-// range via integer division (`percent * 31 / 100`); 50 reproduces that
-// same -12dB default exactly (50*31/100 truncates to 15) as a known,
-// code-controlled starting point for the bench sweep in
-// docs/dsp_design_notes/rx_gain_and_level_calibration.md - not yet a
-// calibrated value in its own right, just "the same thing it was
-// already doing, but on purpose now."
-#define RX_CAPTURE_GAIN_PERCENT 50
+// confirmed routing 'Line In' (not 'Mic') into this same stage.
+// `sound_mixer()` (below) maps this ALSA percent (0-100) onto the
+// control's real 0-31 range via integer division (`percent * 31 /
+// 100`).
+//
+// 70 (raw step 21, ~-3.0dB) was chosen from real bench/on-air data
+// (2026-09, docs/dsp_design_notes/rx_gain_and_level_calibration.md):
+// minibitx never explicitly set this control before, and had been
+// running at whatever the kernel driver defaulted to on boot (raw
+// step 15, -12.00dB) - a scan across bands at that default found a
+// dummy-load (no-signal) noise floor around -61dBFS peak and the
+// strongest real on-air signal seen (40m FT8, corroborated by SDR
+// Console reading -65dBm against a -110dBm noise floor there) peaking
+// at only -41.7dBFS - 40dB of unused headroom below full-scale even on
+// the liveliest band tested. 70% (+9dB over that -12dB default) uses
+// more of that headroom without coming near clipping on anything
+// observed so far. RX_CLIP_GUARD below (unconditionally compiled in,
+// unlike the old bench-only diagnostic this replaced) is the ongoing
+// check for whether some future, stronger signal ever proves that
+// wrong.
+#define RX_CAPTURE_GAIN_PERCENT 70
 
 /* ------------------------------------------------------------------ */
 /*  TX sample scaling - see hw_settings.h for the per-band 'scale'      */
@@ -324,49 +333,34 @@ static void xrun_note(struct xrun_tracker *t, const char *label)
 /* ------------------------------------------------------------------ */
 /*  IQ mixing                                                         */
 /* ------------------------------------------------------------------ */
-#ifdef RX_GAIN_DIAG
-// Temporary bench diagnostic for
-// docs/dsp_design_notes/rx_gain_and_level_calibration.md - not compiled
-// into normal builds (build with `make CPPFLAGS=-DRX_GAIN_DIAG` to
-// enable it for a bench session, plain `make` otherwise). Tracks the
-// raw ADC sample - "rf" below, before any digital mixing or filtering -
-// against full scale, since that's the one signal in the whole chain
-// that reflects the WM8731 'Capture' gain (RX_CAPTURE_GAIN_PERCENT)
-// directly, independent of anything downstream (IQ mixing, the
-// anti-alias filter, decimation, or either output consumer's own
-// scaling) - see that doc's Caveat 2 (and RX_CAPTURE_GAIN_PERCENT's own
-// comment above for why this isn't 'Line', despite the name being the
-// more obvious guess). Reports peak and RMS in dBFS once per ~1 second
-// of audio (96000 samples at this file's fixed 96kHz capture rate), so
-// a bench session produces one line per second, tagged with the
-// currently tuned frequency and Capture setting so a captured log is
-// self-describing without needing separate notes.
-#define RXDIAG_WINDOW_SAMPLES 96000
-static double rxdiag_peak = 0.0;
-static double rxdiag_sumsq = 0.0;
-static long rxdiag_count = 0;
+// Permanent, always-compiled clip guard - successor to a temporary
+// bench diagnostic (docs/dsp_design_notes/rx_gain_and_level_calibration.md
+// §6) that logged a peak/RMS dBFS line once per second during the RX
+// gain bench study. That study's job is done (see
+// RX_CAPTURE_GAIN_PERCENT's comment above for the data it produced);
+// what's left worth keeping permanently is just a safety net, not a
+// bench recorder - so this checks the same raw ADC sample ("rf" below,
+// before any digital mixing or filtering - the one signal in the chain
+// that reflects RX_CAPTURE_GAIN_PERCENT directly, see that doc's
+// Caveat 2) against full scale, and says something only on the rising
+// edge of an actual clipping episode - nothing periodic, no RMS, no
+// per-second console traffic. Cheap enough (one fabs() and one compare
+// per sample) to leave in every normal build rather than gating it
+// behind a compile flag: negligible next to the mixing and FIR-filter
+// arithmetic already done every sample just below.
+static int rx_clipping = 0;
 
-static void rxdiag_sample(double rf) {
-    double a = fabs(rf);
-    if (a > rxdiag_peak) rxdiag_peak = a;
-    rxdiag_sumsq += rf * rf;
-    rxdiag_count++;
-    if (rxdiag_count >= RXDIAG_WINDOW_SAMPLES) {
-        double rms = sqrt(rxdiag_sumsq / (double)rxdiag_count);
-        // -240dBFS floor instead of -inf for a silent/all-zero window
-        // (e.g. before the antenna/dummy load is even connected) - keeps
-        // the log numeric and greppable rather than printing "-inf".
-        double peak_dbfs = 20.0 * log10(rxdiag_peak > 1e-12 ? rxdiag_peak : 1e-12);
-        double rms_dbfs  = 20.0 * log10(rms > 1e-12 ? rms : 1e-12);
-        printf("rxgain: freq=%d capture=%d%% peak=%.1fdBFS rms=%.1fdBFS%s\n",
-               freq_hdr, RX_CAPTURE_GAIN_PERCENT, peak_dbfs, rms_dbfs,
-               rxdiag_peak >= 0.999 ? "  *** CLIPPING ***" : "");
-        rxdiag_peak = 0.0;
-        rxdiag_sumsq = 0.0;
-        rxdiag_count = 0;
+static void rx_clip_check(double rf) {
+    int clipped_now = fabs(rf) >= 0.999;
+    if (clipped_now && !rx_clipping) {
+        fprintf(stderr,
+                "sound: *** CLIPPING *** freq=%d capture=%d%% - RF front "
+                "end is overdriving the ADC, consider lowering "
+                "RX_CAPTURE_GAIN_PERCENT\n",
+                freq_hdr, RX_CAPTURE_GAIN_PERCENT);
     }
+    rx_clipping = clipped_now;
 }
-#endif
 
 static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output_speaker,
                            int32_t *output_tx, int n_samples) {
@@ -402,9 +396,7 @@ static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output
         vfo_read_iq(&lo, &lo_i, &lo_q);
 
         double rf = (double)s / 2147483648.0;
-#ifdef RX_GAIN_DIAG
-        rxdiag_sample(rf);
-#endif
+        rx_clip_check(rf);
 
         // mix to IQ
         i_samples[n] = rf * ((double)lo_i / 1073741824.0);
