@@ -174,12 +174,12 @@ static int uac_gadget_create(void) {
 
   // Set as soon as a gadget directory exists, not only after a full
   // success, so a failed bind still gets cleaned up by uac_stop() -
-  // see docs/usb_gadget_os_setup.md §8 for the restart bug this fixed.
+  // see docs/dsp_design_notes/usb_gadget_OS_setup.md §8 for the restart bug this fixed.
   uac_gadget_up = 1;
 
   // Self-heal: unbind a gadget left BOUND by a previous run before
   // reconfiguring/rebinding, or the kernel refuses with EBUSY on every
-  // restart after the first - see docs/usb_gadget_os_setup.md §8.
+  // restart after the first - see docs/dsp_design_notes/usb_gadget_OS_setup.md §8.
   // Idempotent even when nothing was actually bound.
   snprintf(path, sizeof(path), "%s/UDC", UAC_GADGET_ROOT);
   {
@@ -305,7 +305,7 @@ static void uac_gadget_destroy(void) {
   // write - a 0-length write doesn't reliably reach the kernel's UDC
   // store callback, matching the shell idiom `echo "" > UDC` (which
   // itself writes one byte) rather than the literal empty string. See
-  // docs/usb_gadget_os_setup.md §8 for the bench story behind this.
+  // docs/dsp_design_notes/usb_gadget_OS_setup.md §8 for the bench story behind this.
   snprintf(path, sizeof(path), "%s/UDC", UAC_GADGET_ROOT);
   uac_write_attr(path, "\n");
 
@@ -320,7 +320,7 @@ static void uac_gadget_destroy(void) {
   // is deliberately skipped: bench-confirmed to hang this process
   // forever, unkillable even with SIGKILL (a kernel-side issue in
   // u_serial.c/usb_f_acm.c freeing the gserial/ttyGS0 port on rmdir -
-  // see docs/usb_gadget_os_setup.md §14 for the full kernel stack and
+  // see docs/dsp_design_notes/usb_gadget_OS_setup.md §14 for the full kernel stack and
   // writeup). Safe to skip: configfs is in-memory and doesn't survive
   // a reboot, and uac_gadget_create()'s self-heal already tolerates a
   // leftover tree, so restarting on the same boot just reuses the
@@ -354,7 +354,7 @@ static void uac_gadget_destroy(void) {
 // version wrote to a separate snd-aloop "Loopback" card instead, on the
 // mistaken assumption UAC2 reads its capture side from that
 // automatically - it doesn't, so nothing ever reached the USB link; see
-// docs/usb_gadget_os_setup.md §11 for that bench story.
+// docs/dsp_design_notes/usb_gadget_OS_setup.md §11 for that bench story.
 // Returns 0 on success, -1 on ALSA error.
 static int uac_alsa_open(void) {
   int card_idx = -1;
@@ -422,7 +422,7 @@ static int uac_alsa_open(void) {
  * quality, never the radio's own real hardware timing. Ported from an
  * earlier design that wrote inline from the audio thread and
  * reintroduced sound.c's xrun flood whenever no host was draining the
- * gadget - see docs/usb_gadget_os_setup.md §7 for that bench story.
+ * gadget - see docs/dsp_design_notes/usb_gadget_OS_setup.md §7 for that bench story.
  * --------------------------------------------------------------------- */
 static void *uac_writer_thread(void *arg) {
   (void)arg;
@@ -430,7 +430,7 @@ static void *uac_writer_thread(void *arg) {
   // err_streak drives the backoff below; host_was_draining logs state
   // *transitions* only, not every attempt. Both start pessimistic and
   // require sustained evidence before flipping - see
-  // docs/usb_gadget_os_setup.md §11 for why (a naive version logged a
+  // docs/dsp_design_notes/usb_gadget_OS_setup.md §11 for why (a naive version logged a
   // spurious transition on every cold boot with no cable connected).
   unsigned err_streak = 0;
   unsigned success_streak = 0;
@@ -457,7 +457,7 @@ static void *uac_writer_thread(void *arg) {
     // Back off the retry pace itself, not just the logging, while no
     // host is draining the gadget - ramps from one period up to a
     // ~1s cap as the failure streak grows, reset immediately on a
-    // success. See docs/usb_gadget_os_setup.md §11 for why (retrying
+    // success. See docs/dsp_design_notes/usb_gadget_OS_setup.md §11 for why (retrying
     // at full pace forever would make "no cable" a low-grade cost
     // instead of the fully-supported idle state it's meant to be).
     if (err_streak > 0) {
@@ -521,7 +521,7 @@ static void *uac_writer_thread(void *arg) {
       // interface yet (cable unplugged, or no app has opened it) -
       // a normal, expected state, not a fault, so log the
       // *transition* into it once rather than every retry. See
-      // docs/usb_gadget_os_setup.md §11.
+      // docs/dsp_design_notes/usb_gadget_OS_setup.md §11.
       if (host_was_draining) {
         fprintf(stderr,
                 "uac: no USB host draining the gadget yet (%s) - "
@@ -550,7 +550,7 @@ static void *uac_writer_thread(void *arg) {
 
       // Require more consecutive successes than UAC_PERIODS before
       // trusting it as proof of a draining host - see
-      // docs/usb_gadget_os_setup.md §11 for why a short run can
+      // docs/dsp_design_notes/usb_gadget_OS_setup.md §11 for why a short run can
       // succeed purely from empty-buffer slack.
       if (!host_was_draining && success_streak > UAC_PERIODS) {
         if (pending_err_streak > 0) {
@@ -650,7 +650,7 @@ int uac_is_active(void) { return uac_active; }
  * function acm.usb0 (created/bound in uac_gadget_create() above; see
  * usb_gadget.h for why this is folded into the same file rather than a
  * separate translation unit). See docs/04_remote_control_and_iq_output.md
- * for the command set and why TS-480, and docs/usb_gadget_os_setup.md
+ * for the command set and why TS-480, and docs/dsp_design_notes/usb_gadget_OS_setup.md
  * §13 for the bench-test checklist. Best-effort like the rest of this
  * file: cat_init() failing is not fatal.
  *
@@ -973,7 +973,7 @@ void cat_stop(void) {
 
   // Deliberately does NOT pthread_join() the reader thread - an
   // earlier version did, and bench-confirmed it turns into the same
-  // unkillable shutdown hang as §14 of docs/usb_gadget_os_setup.md,
+  // unkillable shutdown hang as §14 of docs/dsp_design_notes/usb_gadget_OS_setup.md,
   // just relocated into cat_stop(). Leaving it detached means that
   // hang, if it recurs, hangs alone rather than taking shutdown down
   // with it; §14's rmdir() workaround doesn't depend on this thread
