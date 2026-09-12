@@ -25,7 +25,7 @@
 // take the default action - the process died on the spot, skipping every
 // _stop() function below entirely. That's exactly what left the USB
 // gadget's configfs tree bound to a dead process on the next start (see
-// docs/usb_gadget_os_setup.md §8 - fixed there too, independently, as a
+// docs/dsp_design_notes/usb_gadget_OS_setup.md §8 - fixed there too, independently, as a
 // self-healing backstop against this same state arising from a crash or
 // SIGKILL, which can't be caught here), and could in principle leave
 // PTT/the T/R relay stuck asserted if Ctrl+C landed while the key was
