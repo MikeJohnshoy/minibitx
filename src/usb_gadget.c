@@ -337,9 +337,7 @@ static void uac_gadget_destroy(void) {
   // would fail anyway (ENOTEMPTY) since acm.usb0 is still there -
   // stated outright here rather than left as a silent ENOTEMPTY.
 
-  printf("uac: gadget partially removed (UDC unbound, config detached; "
-         "the ACM/CAT function's own directory is intentionally left in "
-         "place until reboot - see the comment above)\n");
+  printf("uac: gadget shutdown\n");
 }
 
 /* ---------------------------------------------------------------------
