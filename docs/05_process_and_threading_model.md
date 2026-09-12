@@ -17,7 +17,29 @@ Status: stub.
   symmetry, not because the other order was broken.
 - The thread structure once running: the HPSDR poll/listener thread, the
   Hamlib accept thread plus one thread per connected client, the audio
-  thread driving `sound_process()`, and the main thread's idle loop.
+  thread driving `sound_process()`, the USB gadget's UAC writer thread
+  (see [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md) §7), a
+  dedicated TX worker thread (below), and the main thread's idle loop.
+- **TX transitions run on their own worker thread** (`radio.c`'s
+  `radio_tx_worker()`), not on whichever thread calls `radio_set_tx()`.
+  This replaced an earlier version where `radio_set_tx()` did its
+  PTT/relay-settling `usleep()`s and ALSA mixer call inline, on the
+  caller's own thread — harmless from Hamlib's or `hpsdr_p1.c`'s network
+  threads, but `cw.c` calls `radio_set_tx()` from `cw_poll_key()`, which
+  runs once per ~10.7ms audio block on the real-time audio thread
+  (`sound.c`'s `audio_loop()`). A single call there blocking 20ms+ (PTT
+  settle + relay settle + opening/closing a fresh ALSA mixer handle)
+  guaranteed a missed capture period — the `sound: xrun, recovering`
+  logged on every key transition — and made the physical key feel
+  sluggish, since `cw_poll_key()` couldn't return to re-poll it until
+  the blocking sequence finished. Fix: `radio_set_tx()` keeps its exact
+  signature and still updates `in_tx` immediately/synchronously (cheap —
+  every other guard in the codebase that reads `in_tx`, e.g.
+  `cw_tx_active()` and the network MOX logic, needs to see the new state
+  right away, even though the physical relay/mixer change is still
+  pending); the actual slow hardware sequence (`radio_tx_apply()`) is
+  handed to the worker thread via a mutex/condvar/pending-flag pair, so
+  the calling thread — audio thread included — never blocks.
 - Graceful shutdown: `main()` installs a `SIGINT`/`SIGTERM` handler
   (Ctrl+C, or a normal `kill`/`systemctl stop` - not `SIGKILL`, which
   can't be caught) that sets a flag; the idle loop notices it, parks
