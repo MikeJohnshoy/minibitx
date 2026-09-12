@@ -182,6 +182,23 @@ void setup_audio_codec(void) {
   sound_mixer("hw:0", "Output Mixer Mic Sidetone", 0);
 }
 
+// Mute/restore the WM8731 'Capture' gain around a TX burst - called from
+// radio.c's radio_tx_apply() on every TX/RX transition, not from
+// anywhere in this file. Muting on TX entry - before the relay even
+// switches, ideally before PTT asserts at all - keeps whatever bleeds
+// into the RX input during TX (relay leakage, PA harmonics, plain
+// electrical crosstalk on a shared-ground board) out of the ADC and the
+// DSP chain built on top of it: real sbitx's own tr_switch() applies
+// this exact protection to this exact codec ("kill ADC input
+// immediately" / "restore ADC input AFTER relay has settled" -
+// github.com/drexjj/sbitx, sbitx.c). Restoring only after RX is fully
+// re-engaged (radio_tx_apply()'s tx_off branch, after the relay/PTT
+// sequence and the clk1/clk2 restore) avoids feeding the DSP chain raw
+// relay-transient noise the instant contacts close, the same reasoning.
+void sound_set_rx_capture(int enable) {
+    sound_mixer("hw:0", "Capture", enable ? RX_CAPTURE_GAIN_PERCENT : 0);
+}
+
 /* ------------------------------------------------------------------ */
 /*  ALSA PCM helpers                                                  */
 /* ------------------------------------------------------------------ */
