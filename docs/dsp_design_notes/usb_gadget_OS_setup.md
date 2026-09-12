@@ -22,7 +22,7 @@ for that specific piece.
 ## 1. Background
 
 `usb_gadget.c` (see
-[`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md))
+[`04_remote_control_and_iq_output.md`](../04_remote_control_and_iq_output.md))
 presents minibitx as a USB Audio Class 2.0 capture device over configfs —
 but only if the underlying OS/kernel already has a USB device-mode
 controller (UDC) bound and ready. On a fresh Raspberry Pi OS install, that
@@ -36,7 +36,7 @@ init: USB IQ gadget unavailable, continuing without it
 
 `usb_gadget.c` already treats this as non-fatal (minibitx keeps running
 over HPSDR/UDP regardless — see
-[`05_process_and_threading_model.md`](05_process_and_threading_model.md)),
+[`05_process_and_threading_model.md`](../05_process_and_threading_model.md)),
 but the steps below get the UAC2 gadget itself actually working.
 
 This uses the Pi 4's **USB-C port** specifically — the board's four USB-A
@@ -534,7 +534,7 @@ As of this writing, `usb_gadget.c` creates a second function in the same
 gadget alongside `uac2.0`: `acm.usb0`, a standard CDC-ACM serial port,
 bound into the same `configs/c.1`. The CAT control section near the
 bottom of that same file (see
-[`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md))
+[`04_remote_control_and_iq_output.md`](../04_remote_control_and_iq_output.md))
 opens the resulting `/dev/ttyGS0` on the Pi side and answers Kenwood
 TS-480-subset CAT commands on it - the intended use is FLRig on Windows
 opening whatever COM port Windows assigns the gadget, with no bridge
