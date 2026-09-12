@@ -241,6 +241,19 @@ never anything hardware-facing:
   regardless of the DRIVE setting." Lowering it would undo the
   wattmeter-calibrated power above, not just turn down the local
   sidetone.
+- **`sound_set_rx_capture()`** (`sound.c`) — mutes the WM8731 "Capture"
+  ALSA control (the RX analog gain stage - see
+  [`dsp_design_notes/rx_gain_and_level_calibration.md`](dsp_design_notes/rx_gain_and_level_calibration.md))
+  to 0 the moment `radio_tx_apply()` enters TX, before PTT/the relay/
+  either clock change - i.e. before any TX RF exists at all - and
+  restores it to `RX_CAPTURE_GAIN_PERCENT` only as the very last step of
+  returning to RX, after the relay has actually settled back. Protects
+  the ADC and the DSP chain built on it from whatever bleeds into the RX
+  input during TX (relay leakage, PA harmonics, shared-ground
+  crosstalk) - the same protection real sbitx's own `tr_switch()`
+  applies to this exact codec. Purely a TX-safety measure; it has no
+  effect on transmitted power (that's `TX_MASTER_VOL` and
+  `TX_GAIN_CORRECTION` above).
 - **`SIDETONE_PEAK_AMPLITUDE`** (`sound.c`) — the one knob that does
   *not* affect transmitted power: a fixed PCM peak amplitude applied
   only to the DAC's left channel (local on-board-speaker monitor, at
