@@ -111,11 +111,58 @@ Hamlib uses, never a separate path — and echoes it to the console as
 than `rigctl:` so it's clear which control surface actually drove the
 change.
 
-**Outbound (I/Q):** `hpsdr_send_iq()` packetizes the baseband I/Q handed
-to it by `sound_process()` into HPSDR Protocol 1 UDP frames and sends
-them inline, without flow control or mutexes. I and Q values are scaled
-up before sending to make SDR apps happier. This file has no dependency
-on `usb_gadget.c` — each holds its own independent copy of the I/Q.
+Getting this parser right took a few real bugs shaking out on the
+bench, all against `process_ep2_frame()`/`handle_command()`
+(`hpsdr_p1.c`): an early, looser version with no exact-length checks on
+inbound packets let torn/malformed EP2 frames decode into nonsensical,
+wildly-varying C&C addresses with the MOX bit effectively random — the
+strict per-packet-type length checks now in `handle_command()` (modeled
+on piHPSDR's `hpsdrsim.c`, a mature reference for this side of the
+protocol) fixed that. Two more surfaced even with strict lengths in
+place: reading MOX from every C&C address (matching `hpsdrsim.c`
+literally) still picked up unrelated register data as spurious PTT
+activity, fixed by only acting on it from address 0; and comparing the
+network's want-TX bit against the shared `in_tx` (which the local key
+in `cw.c` also writes) let an unchanged, already-stale network value
+look like a fresh request the instant the local key's hang timer
+released TX, latching TX on permanently after a single key press. Fixed
+with `net_mox` — a variable tracking only the network's own last-seen
+MOX bit, independent of `in_tx` — so only a genuine *change* in what
+the network is sending can trigger an action, never `in_tx` moving for
+an unrelated (local-key) reason.
+
+**Outbound (I/Q):** `hpsdr_send_iq()` (called once per audio-thread
+block from `sound_process()`) only ever appends to a lock-free
+single-producer/single-consumer ring buffer and returns immediately - a
+dedicated pacer thread (`hpsdr_pacer_thread()`) is the sole consumer,
+draining it and sending one packet every 1.3125ms (126 samples @
+96kHz), paced against an absolute wake time so the long-run rate never
+drifts. This replaced an earlier version that packetized and sent
+inline, directly from the audio thread, in one tight loop per block -
+which fired a whole block's ~9 packets back-to-back within ~1ms, then
+sent nothing for the remaining ~10ms until the next block, a bursty
+pattern real HPSDR hardware never produces. SDR Console tolerated it;
+SparkSDR's jitter buffer apparently did not (the leading suspect for a
+~170ms audio warble reported against it specifically - same I/Q
+content either way, only its arrival timing differed from what real
+hardware would produce). Two earlier fix attempts were tried and
+reverted before landing on the ring buffer: `usleep()` between packets
+directly on the audio thread caused immediate, continuous xruns (a
+capture period is real wall-clock time already fully spent; sleeping
+on top of it is a permanent rate deficit, not absorbable jitter, and
+the capture ring buffer overran within about 6 iterations); a
+mutex-protected queue reproduced the identical xrun symptom for a
+different reason - a plain mutex shared between the audio thread's
+`SCHED_FIFO` max priority (see
+[`08_troubleshooting_and_bringup.md`](08_troubleshooting_and_bringup.md))
+and this file's ordinary-priority pacer is a textbook priority-inversion
+trap, since the default Linux pthread mutex has no priority-inheritance
+protocol. The lock-free design avoids blocking either side by
+construction: the producer always advances (dropping a sample rather
+than ever waiting on the consumer), and the consumer just drains
+whatever's available each tick. I and Q values are scaled up before
+sending to make SDR apps happier. This file has no dependency on
+`usb_gadget.c` — each holds its own independent copy of the I/Q.
 
 ## USB Audio Class (UAC2) output
 
