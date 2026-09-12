@@ -21,7 +21,7 @@ Status: stub.
   already-in-place dependencies - it needs its own OS-level setup
   (`dtoverlay=dwc2, dr_mode=peripheral`, `libcomposite`, and powering the
   Pi via GPIO instead of USB-C). See
-  [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md).
+  [`usb_gadget_os_setup.md`](dsp_design_notes/usb_gadget_OS_setup.md).
 - Deployment: running under a plain terminal versus systemd/journald —
   see [`05_process_and_threading_model.md`](05_process_and_threading_model.md)
   for how minibitx reports operational state either way (per-command
