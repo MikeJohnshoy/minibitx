@@ -66,7 +66,7 @@ control" section near the bottom of that file, alongside the UAC2 code
 rather than a separate translation unit, since both are just two
 functions of the one composite gadget `usb_gadget.c` already owns —
 that answers as a Kenwood TS-480 over the USB gadget's own CDC-ACM
-serial function (see [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md)
+serial function (see [`usb_gadget_os_setup.md`](dsp_design_notes/usb_gadget_OS_setup.md)
 for the gadget composite-device details) — so FLRig just opens the COM
 port Windows assigns the gadget, no extra software involved. The TS-480
 subset was picked because it's exactly the CAT dialect the QRP Labs
@@ -186,7 +186,7 @@ sending to make SDR apps happier. This file has no dependency on
 `usb_gadget.c` presents the radio as a standard USB Audio Class 2.0
 capture device, if the hardware/kernel support it (needs a USB
 device-mode controller and `libcomposite`) - see
-[`usb_gadget_os_setup.md`](usb_gadget_os_setup.md) for the Raspberry Pi 4
+[`usb_gadget_os_setup.md`](dsp_design_notes/usb_gadget_OS_setup.md) for the Raspberry Pi 4
 config.txt/cmdline.txt changes and GPIO-power caveat this requires; it is
 not on by default on a stock Raspberry Pi OS install. It's fed its own I/Q copy
 directly from `sound.c`, with no ALSA/gadget dependency on
