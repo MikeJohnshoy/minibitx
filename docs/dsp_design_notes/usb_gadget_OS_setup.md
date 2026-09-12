@@ -8,14 +8,16 @@ USB-A host port (§10); and WSJT-X now opens "sBitx IQ" directly and
 decodes FT8 correctly (§9, §11) - the last open question (whether audio
 data actually reached the host at all, not just correct enumeration) is
 resolved. §13 adds a second gadget function (CDC-ACM, for CAT control)
-alongside the UAC2 one covered everywhere else in this document - that
-combination is new as of this writing and **not yet bench-tested**; see
-§13 for what to check first. §14 documents two related kernel-side
-hangs this combination bench-confirmed on 2026-09 when shutting down
-with no USB host ever connected, and the workarounds already applied in
-`usb_gadget.c` (as of this writing, believed fixed but pending a
-confirming bench re-test - see §14's last two paragraphs) - read that
-before your first bench pass.
+alongside the UAC2 one covered everywhere else in this document. §14
+documents two related kernel-side shutdown hangs this combination
+bench-confirmed on 2026-09 (both only when no USB host was ever
+connected) and the workarounds applied in `usb_gadget.c` for each -
+**both re-confirmed fixed** on a subsequent bench pass: repeated clean
+shutdowns with no host ever connected, and a clean shutdown with WSJT-X
+actually connected over USB (confirming the fixes didn't disturb the
+already-working host-attached path either). FLRig/CAT itself is still
+unverified against real FLRig traffic - §13's checklist still applies
+for that specific piece.
 
 ## 1. Background
 
@@ -474,6 +476,22 @@ USB host draining" transition logged once at startup and cleared on its
 own (logged once more) as soon as WSJT-X opened the capture stream, with
 no further console noise after that.
 
+Two more subtleties went into making that transition log trustworthy,
+both in `uac_writer_thread()`: it starts out assuming "no host draining"
+rather than the reverse, because this thread's very first writes happen
+before any host has had a chance to attach at all - an optimistic start
+would have logged a spurious "draining" transition on essentially every
+cold boot with no cable connected, the normal, fully-supported way to
+run this daemon. And a single successful write (or a short run of them)
+right after opening a fresh PCM isn't trusted as proof a host is
+actually draining it either - the gadget's ring buffer is `UAC_PERIODS`
+periods deep, so that many writes can succeed purely because there's
+room in an empty buffer, even with nothing reading the other end
+(bench-observed: a fresh bind with no USB cable attached still reported
+one successful write before the real, sustained failure). Only a run of
+successes longer than the buffer could have absorbed for free is treated
+as real evidence of a host.
+
 ## 12. A single harmless Windows toast right after a Pi reboot - before minibitx even runs
 
 Bench-observed 2026-09: a "USB device not recognized" toast appears on
@@ -698,11 +716,20 @@ tree) - but nothing downstream actually depends on that guarantee, since
 this section's `rmdir()` workaround already avoids touching
 `functions/acm.usb0` at all.
 
-**Net effect of both fixes together:** shutdown with no USB host ever
-connected should now complete promptly, without hanging in either the
-`rmdir()` this section originally documented or the CAT thread's own
-teardown. If a *third* hang shows up somewhere else in this same
-shutdown sequence, look for the same signature first (a print that
-should have followed immediately never appears) before assuming
-something new and unrelated - this exact subsystem has now produced two
-hangs from the same underlying cause on this kernel build.
+**Net effect of both fixes together, bench-re-confirmed 2026-09:**
+repeated fresh-reboot/no-cable/Ctrl+C cycles now shut down cleanly and
+promptly every time, printing `uac: gadget partially removed (...)` and
+`minibitx: shutdown complete` rather than hanging - both the `rmdir()`
+this section originally documented and the CAT thread's own teardown
+are confirmed fixed, not just believed fixed. A shutdown with WSJT-X
+actually connected over USB was also re-tested afterward and stays
+clean, confirming neither fix disturbed the already-working
+host-attached path (which never went through either hazardous code
+path to begin with, so this was more a sanity check than an expected
+risk).
+
+If a *third* hang ever shows up somewhere else in this same shutdown
+sequence, look for the same signature first (a print that should have
+followed immediately never appears) before assuming something new and
+unrelated - this exact subsystem has now produced two hangs from the
+same underlying cause on this kernel build.
