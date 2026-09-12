@@ -19,4 +19,11 @@ void sound_mixer(char *card_name, char *element, int make_on);
    Call once, after the ALSA devices are otherwise ready. */
 void setup_audio_codec(void);
 
+/* Mute (enable=0) or restore (enable=1, back to RX_CAPTURE_GAIN_PERCENT)
+   the WM8731 'Capture' gain around a TX burst - see radio.c's
+   radio_tx_apply(), which calls this on every TX/RX transition, and
+   docs/dsp_design_notes/rx_gain_and_level_calibration.md for why this
+   protects the ADC/DSP chain from TX energy. */
+void sound_set_rx_capture(int enable);
+
 #endif /* SOUND_H */
