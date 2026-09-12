@@ -18,7 +18,7 @@ Status: stub.
 - The thread structure once running: the HPSDR poll/listener thread, the
   Hamlib accept thread plus one thread per connected client, the audio
   thread driving `sound_process()`, the USB gadget's UAC writer thread
-  (see [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md) §7), a
+  (see [`usb_gadget_os_setup.md`](dsp_design_notes/usb_gadget_OS_setup.md) §7), a
   dedicated TX worker thread (below), and the main thread's idle loop.
 - **TX transitions run on their own worker thread** (`radio.c`'s
   `radio_tx_worker()`), not on whichever thread calls `radio_set_tx()`.
@@ -49,7 +49,7 @@ Status: stub.
   feeds both `hpsdr_send_iq()` and `uac_push_iq()`, so neither consumer
   races a producer still calling into it), then `uac_stop()`,
   `hpsdr_stop()`, `hamlib_stop()`. See
-  [`usb_gadget_os_setup.md`](usb_gadget_os_setup.md) §8 for the failure
+  [`usb_gadget_os_setup.md`](dsp_design_notes/usb_gadget_OS_setup.md) §8 for the failure
   mode this fixed (a restart-without-rebooting used to leave the USB
   gadget's configfs tree bound to a dead process) and for the
   independent self-healing fix that still covers `SIGKILL`/a crash,
