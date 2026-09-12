@@ -1,13 +1,13 @@
 // radio.c
 
-#include "cw.h"
 #include "radio.h"
 #include "radio_hw.h"
 #include "si5351.h"
 #include "sound.h"
-#include <pthread.h>
+#include "cw.h"
 #include <stdio.h>
 #include <unistd.h>
+#include <pthread.h>
 
 int freq_hdr = 7030000;
 int in_tx = 0;
@@ -64,20 +64,20 @@ struct vfo lo;
 #define TX_MASTER_VOL 95
 
 void radio_tune_to(uint32_t f) {
-  freq_hdr = f;
-  // Mixer 1 (clk2) places f exactly at the crystal filter's real
-  // center - simple by construction now that this doesn't have to
-  // also carry bfo_freq's deliberate TX-only offset (see
-  // xtal_filter_center's comment above). Mixer 2 (clk1) is what
-  // actually finishes the trip to RX_IF_FREQ_HZ from there; it's set
-  // to xtal_filter_center + RX_IF_FREQ_HZ at startup (minibitx.c) and
-  // restored to that same value here every time RX resumes
-  // (radio_tx_apply(), below). This function must not touch clk1
-  // itself - it's also called for plain RX retuning with no TX
-  // transition involved.
-  si5351bx_setfreq(2, f + xtal_filter_center);
-  vfo_start(&lo, RX_IF_FREQ_HZ, lo.phase);
-  set_lpf_40mhz(f); // enable the correct LPF for this band
+    freq_hdr = f;
+    // Mixer 1 (clk2) places f exactly at the crystal filter's real
+    // center - simple by construction now that this doesn't have to
+    // also carry bfo_freq's deliberate TX-only offset (see
+    // xtal_filter_center's comment above). Mixer 2 (clk1) is what
+    // actually finishes the trip to RX_IF_FREQ_HZ from there; it's set
+    // to xtal_filter_center + RX_IF_FREQ_HZ at startup (minibitx.c) and
+    // restored to that same value here every time RX resumes
+    // (radio_tx_apply(), below). This function must not touch clk1
+    // itself - it's also called for plain RX retuning with no TX
+    // transition involved.
+    si5351bx_setfreq(2, f + xtal_filter_center);
+    vfo_start(&lo, RX_IF_FREQ_HZ, lo.phase);
+    set_lpf_40mhz(f);    // enable the correct LPF for this band
 }
 
 // ---- TX worker thread ------------------------------------------------
@@ -100,94 +100,109 @@ void radio_tune_to(uint32_t f) {
 // worker thread via a mutex/condvar/pending-flag, so the calling
 // thread (audio thread included) never blocks.
 static pthread_mutex_t tx_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t tx_cond = PTHREAD_COND_INITIALIZER;
-static int tx_pending = 0;    // 1 = worker has a state change to apply
-static int tx_pending_on = 0; // the state to apply (1 = TX, 0 = RX)
+static pthread_cond_t  tx_cond  = PTHREAD_COND_INITIALIZER;
+static int tx_pending    = 0;   // 1 = worker has a state change to apply
+static int tx_pending_on = 0;   // the state to apply (1 = TX, 0 = RX)
 static pthread_once_t tx_worker_once = PTHREAD_ONCE_INIT;
 
-static void radio_tx_apply(int tx_on) {
-  if (tx_on) {
-    // Entering TX: clk1 switches from its RX value
-    // (xtal_filter_center + RX_IF_FREQ_HZ) to the real BFO
-    // (bfo_freq) - see bfo_freq's comment above for why TX needs a
-    // different, deliberately off-center clk1 than RX does. clk2 is
-    // retuned to match: mixer 1 must deliver freq_hdr at the antenna
-    // from whatever mixer 2 actually hands it, which - per
-    // TX_IF_OFFSET_HZ's own bench derivation in cw.c - lands
-    // CW_PITCH_HZ short of xtal_filter_center, not exactly on it
-    // (a real, deliberate residual from that calibration, not an
-    // oversight here). This produces the exact same clk2 value the
-    // old `freq_hdr + bfo_freq - RX_IF_FREQ_HZ + CW_PITCH_HZ`
-    // formula did - they're algebraically identical for today's
-    // constants (the old formula's dependence on RX_IF_FREQ_HZ was
-    // never really about RX_IF_FREQ_HZ; it only existed to cancel
-    // out bfo_freq's own now-removed dependence on it). Applied
-    // here - the one place all TX (straight key via cw.c, and remote
-    // MOX via hpsdr_p1.c, possibly after its own radio_tune_to() to a
-    // split TX frequency) funnels through - rather than in
-    // radio_tune_to() itself, since that call is also used for plain
-    // RX retuning and must not carry either TX-only clock value.
-    // Both clocks are set before PTT/the relay so they're correct
-    // before any RF actually reaches the antenna.
-    si5351bx_setfreq(1, bfo_freq);
-    si5351bx_setfreq(2, freq_hdr + xtal_filter_center - CW_PITCH_HZ);
-    radio_hw_set_ptt(1);
-    usleep(20000); // let PTT assert before keying the relay
-    radio_hw_set_tx_relay(1);
-    sound_mixer("hw:0", "Master", TX_MASTER_VOL); // feed the exciter
-  } else {
-    sound_mixer("hw:0", "Master", 0); // mute before dropping the relay
-    radio_hw_set_ptt(0);
-    usleep(5000); // let the relay settle before dropping PTT
-    radio_hw_set_tx_relay(0);
-    // Restore clk1 to its RX value and clk2 to the plain RX formula
-    // now that TX has fully disengaged - matters most for the
-    // straight-key path, which has no separate radio_tune_to() call
-    // to undo this on its own (unlike hpsdr_p1.c's MOX-with-split-TX-
-    // frequency path, which already retunes back to last_rx_freq
-    // after MOX off - this is a harmless no-op redundant restore in
-    // that case).
-    si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
-    si5351bx_setfreq(2, freq_hdr + xtal_filter_center);
-  }
+static void radio_tx_apply(int tx_on)
+{
+    if (tx_on) {
+        // Entering TX: clk1 switches from its RX value
+        // (xtal_filter_center + RX_IF_FREQ_HZ) to the real BFO
+        // (bfo_freq) - see bfo_freq's comment above for why TX needs a
+        // different, deliberately off-center clk1 than RX does. clk2 is
+        // retuned to match: mixer 1 must deliver freq_hdr at the antenna
+        // from whatever mixer 2 actually hands it, which - per
+        // TX_IF_OFFSET_HZ's own bench derivation in cw.c - lands
+        // CW_PITCH_HZ short of xtal_filter_center, not exactly on it
+        // (a real, deliberate residual from that calibration, not an
+        // oversight here). This produces the exact same clk2 value the
+        // old `freq_hdr + bfo_freq - RX_IF_FREQ_HZ + CW_PITCH_HZ`
+        // formula did - they're algebraically identical for today's
+        // constants (the old formula's dependence on RX_IF_FREQ_HZ was
+        // never really about RX_IF_FREQ_HZ; it only existed to cancel
+        // out bfo_freq's own now-removed dependence on it). Applied
+        // here - the one place all TX (straight key via cw.c, and remote
+        // MOX via hpsdr_p1.c, possibly after its own radio_tune_to() to a
+        // split TX frequency) funnels through - rather than in
+        // radio_tune_to() itself, since that call is also used for plain
+        // RX retuning and must not carry either TX-only clock value.
+        // Both clocks are set before PTT/the relay so they're correct
+        // before any RF actually reaches the antenna.
+        // Mute the RX ADC input first, before PTT/the relay/either clock
+        // change - i.e. before any TX RF exists at all - so nothing from
+        // this transition can reach the ADC. See sound_set_rx_capture()'s
+        // comment (sound.c) for why, and the tx_off branch below for the
+        // matching restore, mirroring real sbitx's own tr_switch().
+        sound_set_rx_capture(0);
+        si5351bx_setfreq(1, bfo_freq);
+        si5351bx_setfreq(2, freq_hdr + xtal_filter_center - CW_PITCH_HZ);
+        radio_hw_set_ptt(1);
+        usleep(20000);              // let PTT assert before keying the relay
+        radio_hw_set_tx_relay(1);
+        sound_mixer("hw:0", "Master", TX_MASTER_VOL); // feed the exciter
+    } else {
+        sound_mixer("hw:0", "Master", 0); // mute before dropping the relay
+        radio_hw_set_ptt(0);
+        usleep(5000);               // let the relay settle before dropping PTT
+        radio_hw_set_tx_relay(0);
+        // Restore clk1 to its RX value and clk2 to the plain RX formula
+        // now that TX has fully disengaged - matters most for the
+        // straight-key path, which has no separate radio_tune_to() call
+        // to undo this on its own (unlike hpsdr_p1.c's MOX-with-split-TX-
+        // frequency path, which already retunes back to last_rx_freq
+        // after MOX off - this is a harmless no-op redundant restore in
+        // that case).
+        si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
+        si5351bx_setfreq(2, freq_hdr + xtal_filter_center);
+        // Restore the RX ADC input only now that the relay has actually
+        // settled back to RX - restoring any earlier would feed the DSP
+        // chain raw relay-transient noise the instant contacts close. It
+        // stayed muted (0) this whole branch, having been zeroed on the
+        // way into TX above and never touched since.
+        sound_set_rx_capture(1);
+    }
 }
 
-static void *radio_tx_worker(void *arg) {
-  (void)arg;
+static void *radio_tx_worker(void *arg)
+{
+    (void)arg;
 
-  for (;;) {
-    pthread_mutex_lock(&tx_mutex);
-    while (!tx_pending)
-      pthread_cond_wait(&tx_cond, &tx_mutex);
-    int on = tx_pending_on;
-    tx_pending = 0;
-    pthread_mutex_unlock(&tx_mutex);
+    for (;;) {
+        pthread_mutex_lock(&tx_mutex);
+        while (!tx_pending)
+            pthread_cond_wait(&tx_cond, &tx_mutex);
+        int on = tx_pending_on;
+        tx_pending = 0;
+        pthread_mutex_unlock(&tx_mutex);
 
-    radio_tx_apply(on);
-  }
+        radio_tx_apply(on);
+    }
 
-  return NULL;
+    return NULL;
 }
 
-static void radio_tx_worker_start(void) {
-  pthread_t worker;
-  pthread_create(&worker, NULL, radio_tx_worker, NULL);
+static void radio_tx_worker_start(void)
+{
+    pthread_t worker;
+    pthread_create(&worker, NULL, radio_tx_worker, NULL);
 }
 
 // switch between RX and TX
 void radio_set_tx(int tx_on) {
-  pthread_once(&tx_worker_once, radio_tx_worker_start);
+    pthread_once(&tx_worker_once, radio_tx_worker_start);
 
-  in_tx = tx_on ? 1 : 0; // mirrors sbitx: hardware state follows intent,
-                         // updated immediately so other threads' guards
-                         // (cw_tx_active(), the network MOX logic, ...)
-                         // see the new state right away, even though the
-                         // physical relay/mixer change is still pending
-                         // on the worker thread below
+    in_tx = tx_on ? 1 : 0;   // mirrors sbitx: hardware state follows intent,
+                             // updated immediately so other threads' guards
+                             // (cw_tx_active(), the network MOX logic, ...)
+                             // see the new state right away, even though the
+                             // physical relay/mixer change is still pending
+                             // on the worker thread below
 
-  pthread_mutex_lock(&tx_mutex);
-  tx_pending_on = tx_on;
-  tx_pending = 1;
-  pthread_cond_signal(&tx_cond);
-  pthread_mutex_unlock(&tx_mutex);
+    pthread_mutex_lock(&tx_mutex);
+    tx_pending_on = tx_on;
+    tx_pending = 1;
+    pthread_cond_signal(&tx_cond);
+    pthread_mutex_unlock(&tx_mutex);
 }
