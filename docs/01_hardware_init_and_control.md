@@ -185,7 +185,7 @@ writes on minibitx's behalf):
 ```c
 sound_mixer("hw:0", "Input Mux", 0);
 sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON);           // on/off switch, not a gain
-sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 50% of max
+sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain, 70% of max
 sound_mixer("hw:0", "Mic", 0);
 sound_mixer("hw:0", "Master", 0); // Mute local speaker
 ```
