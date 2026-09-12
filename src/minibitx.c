@@ -1,8 +1,8 @@
 // minibitx.c
 //
-// A tiny application that initializes the sbitx radio hardware, and allows 
-// a remote SDR application to control its operation over the network using
-// a subset of openHPSDR Protocol 1 and/or HAMLIB / rigctl.
+// A small application that initializes the sbitx radio hardware, and allows 
+// remote SDR applications to control its operation over network or USB 
+// connections.
 
 #include "hpsdr_p1.h"
 #include "si5351.h"
