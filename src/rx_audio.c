@@ -50,7 +50,6 @@
 #include "cw.h"
 #include "vfo.h"
 #include <math.h>
-#include <stdio.h>
 
 #define SAMPLE_RATE_HZ 96000
 
@@ -171,23 +170,12 @@ double rx_audio_debug_agc_envelope(void) {
 
 void rx_audio_process(const double *i_samples, const double *q_samples,
                        int n, int32_t *out) {
-    // Diagnostic - confirms the AGC is actually riding output toward
-    // AGC_TARGET_AMPLITUDE rather than tracking the raw (and, per bench
-    // data, tiny and wildly variable) input amplitude. Printed roughly
-    // once a second (not per-block) so it doesn't flood the console.
-    static double dbg_peak_in = 0.0;
-    static double dbg_peak_out = 0.0;
-    static int dbg_block_count = 0;
-
     for (int k = 0; k < n; k++) {
         // Stage 1: narrow the passband down around dial center, before
         // moving anything - see the file header for why this has to
         // happen first, at the signal's original location.
         double fi = onepole_apply(&lp_i, i_samples[k]);
         double fq = onepole_apply(&lp_q, q_samples[k]);
-
-        if (fabs(i_samples[k]) > dbg_peak_in) dbg_peak_in = fabs(i_samples[k]);
-        if (fabs(q_samples[k]) > dbg_peak_in) dbg_peak_in = fabs(q_samples[k]);
 
         // Stage 2: mix up to CW_PITCH_HZ and keep only the real part.
         // Re[(fi + j*fq) * (cos + j*sin)] = fi*cos - fq*sin.
@@ -215,21 +203,5 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
         if (sample >  2000000000.0) sample =  2000000000.0;
         if (sample < -2000000000.0) sample = -2000000000.0;
         out[k] = (int32_t)sample;
-
-        if (fabs(sample) > dbg_peak_out) dbg_peak_out = fabs(sample);
-    }
-
-    // n is one audio block (~10.7ms at 96kHz/1024 samples) - print
-    // roughly once a second, i.e. every ~94 blocks.
-    dbg_block_count++;
-    if (dbg_block_count >= 94) {
-        fprintf(stderr,
-                "rx_audio: peak input I/Q=%.6f (of 1.0 full scale), "
-                "AGC envelope=%.6f, peak output=%.0f (of 2e9 full scale), "
-                "volume=%.2f\n",
-                dbg_peak_in, agc_env, dbg_peak_out, rx_volume);
-        dbg_block_count = 0;
-        dbg_peak_in = 0.0;
-        dbg_peak_out = 0.0;
     }
 }
