@@ -33,3 +33,10 @@ already used in `antialias_filter_design.md`.
   undocumented fixed 80%) is itself set correctly, and the recommended
   noise-floor/strong-signal checks to do first. Status: proposed - a
   design discussion recorded ahead of any code.
+- [`rx_audio_demod_design.md`](rx_audio_demod_design.md) — the local CW
+  audio monitor (`rx_audio.c`): the product-detector-plus-BFO design, why
+  a fixed output gain couldn't work once real signal levels were
+  measured on the bench (and the AGC that replaced it), the WM8731
+  `Master` L/R independence fix that came out of the same debugging
+  session, and the known symmetric-response-around-zero-beat limitation.
+  Status: implemented, first on-air CW copy confirmed (2026-09).
