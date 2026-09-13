@@ -10,10 +10,17 @@ WM8731 codec's ALSA capture stream are already up and configured — see
 This document picks up from there: what happens to samples once they're
 flowing, and what tuning changes.
 
-minibitx has no onboard demodulation, no waterfall, no mode logic — the
-connected SDR app does all of that. This document only covers what
-happens before the signal leaves the Pi as baseband I/Q; where that I/Q
-goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md).
+minibitx has no onboard demodulation for the SDR-facing path, no
+waterfall, no mode logic — the connected SDR app does all of that with
+the baseband I/Q this pipeline produces. The one exception is a single,
+fixed-mode local CW audio monitor (`rx_audio.c`) that taps this same I/Q
+for the box's own speaker/headphone output, covered at the end of this
+document and in
+[`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md).
+Everything else below is still exactly "what happens before the signal
+leaves the Pi as baseband I/Q"; where that I/Q goes next (for the two
+network-facing consumers) is
+[`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md).
 
 ## The chain, end to end
 
@@ -50,9 +57,12 @@ goes next is [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_out
      v
   Anti-alias FIR (antialias.c, 21 taps, applied separately to I and Q)
      |
-     v
-  handed to interface software (hpsdr_p1, USB audio out, or simple network
-            interface) to work with external applications
+     +---> hpsdr_p1.c / usb_gadget.c (UAC2) - baseband I/Q handed to an
+     |       external SDR app (04_remote_control_and_iq_output.md)
+     |
+     +---> rx_audio.c - optional local CW demod, straight to the
+             WM8731's own speaker/headphone output, no external app
+             needed (dsp_design_notes/rx_audio_demod_design.md)
 ```
 
 Two mixer stages, two si5351 clocks, two different jobs.
@@ -148,11 +158,22 @@ the symmetric coefficients mean only 11 distinct multiplies per output
 sample rather than 21, and a double-length history buffer avoids any
 wraparound branch in the inner loop.
 
-**Baseband I/Q → the two streaming consumers.** `sound_process()`
-concludes by handing its (now anti-aliased) I/Q arrays off to be streamed
-out — see
+**Baseband I/Q → three consumers.** `sound_process()` concludes by
+handing its (now anti-aliased) I/Q arrays off to whatever's listening.
+Two of the three are the network-facing streaming consumers — see
 [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md)
-for `hpsdr_send_iq()` and `uac_push_iq()`.
+for `hpsdr_send_iq()` and `uac_push_iq()`. The third is `rx_audio.c`'s
+`rx_audio_process()`, called on the very same `i_samples[]`/`q_samples[]`
+arrays: a narrow-filter-plus-BFO product detector (with its own AGC,
+since real signal amplitude at this point varies far more than any fixed
+gain could track) that turns whatever's sitting near dial center into an
+audible CW tone on the WM8731's local monitor output — the one piece of
+onboard demodulation this codebase has, there specifically so the box
+can be used as a standalone CW receiver with no external SDR app
+running at all. It's a straight function call, not a separate thread or
+process — same real-time audio callback, same block, no extra latency
+or a second capture path fighting for the same ALSA device. Full design
+and bench data: [`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md).
 
 ## Retuning
 
