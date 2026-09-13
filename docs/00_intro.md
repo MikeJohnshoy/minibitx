@@ -17,18 +17,28 @@ to the growing collection of high quality SDR applications.
 
 ## What this is not
 
-minibitx has no onboard demodulation, no waterfall, and no mode logic.
-`m`/`M` (mode get/set) exist on the rigctld control port purely so a
-client's mode selector doesn't error out — minibitx doesn't act on the
-value in any way. There is also no dependency on the original sbitx
-codebase at runtime; minibitx was built by extracting the minimum set of
-functions from sbitx needed to let an external SDR app drive the
-hardware, and runs stand-alone.
+minibitx has no waterfall and no mode logic — `m`/`M` (mode get/set)
+exist on the rigctld control port purely so a client's mode selector
+doesn't error out, minibitx doesn't act on the value in any way. It also
+has essentially no onboard demodulation for the SDR-facing path: an
+external SDR application is still expected to do everything downstream
+of baseband I/Q. The one exception is a single, fixed-mode local CW
+audio monitor (`rx_audio.c`) that lets the box be used as a standalone
+CW receiver with no external app running at all — see
+[`02_rx_processing_pipeline.md`](02_rx_processing_pipeline.md) and
+[`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md).
+There is also no dependency on the original sbitx codebase at runtime;
+minibitx was built by extracting the minimum set of functions from sbitx
+needed to let an external SDR app drive the hardware, and runs
+stand-alone.
 
 ## Status
 
 Receive works: antenna to baseband I/Q, streamed over HPSDR and/or USB
-audio, remotely controlled by HPSDR Protocol 1 or tunable via rigctld. 
+audio, remotely controlled by HPSDR Protocol 1 or tunable via rigctld.
+An onboard CW audio monitor (`rx_audio.c`) also lets the box's own
+speaker/headphone output be used directly, with no external SDR app
+required, for CW.
 
 Transmit:  a simple CW waveform (with Blackman-Harris shaping) controlled
 from a straight key on the sbitx key input.
@@ -42,7 +52,8 @@ code:
   bringing up the GPIO lines, the si5351 oscillator, the I2C bus, and the
   WM8731 audio codec before any signal processing can happen.
 - [`02_rx_processing_pipeline.md`](02_rx_processing_pipeline.md) — the
-  receive signal chain itself, antenna to baseband I/Q.
+  receive signal chain itself, antenna to baseband I/Q, plus the local
+  CW audio monitor that taps the same I/Q for standalone listening.
 - [`03_tx_processing_pipeline.md`](03_tx_processing_pipeline.md) — the
   transmit side: what exists, what's planned.
 - [`04_remote_control_and_iq_output.md`](04_remote_control_and_iq_output.md)
