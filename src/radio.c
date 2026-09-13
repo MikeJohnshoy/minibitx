@@ -84,7 +84,7 @@ static void radio_tx_apply(int tx_on) {
     radio_hw_set_tx_relay(1);
     sound_mixer("hw:0", "Master", TX_MASTER_VOL); // feed the exciter
   } else {
-    sound_mixer("hw:0", "Master", 0); // mute before dropping the relay
+    sound_set_local_monitor(0); // mute before dropping the relay
     radio_hw_set_ptt(0);
     usleep(5000); // let the relay settle before dropping PTT
     radio_hw_set_tx_relay(0);
@@ -93,9 +93,16 @@ static void radio_tx_apply(int tx_on) {
     // separate radio_tune_to() call of its own to undo this.
     si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
     si5351bx_setfreq(2, freq_hdr + xtal_filter_center);
-    // Restore Capture only now that the relay has actually settled -
-    // any earlier would feed the DSP chain raw relay-transient noise.
+    // Restore Capture and the local monitor output only now that the
+    // relay has actually settled - any earlier would feed the DSP chain
+    // raw relay-transient noise, or briefly unmute Master while the
+    // relay is still mid-transition. Without this second restore,
+    // Master stays at whatever radio_tx_apply() last set it to (0) for
+    // the rest of RX - rx_audio.c's demod and cw.c's sidetone would only
+    // ever be audible during the brief TX_MASTER_VOL window of a TX
+    // burst itself, never at rest in RX.
     sound_set_rx_capture(1);
+    sound_set_local_monitor(1);
   }
 }
 
