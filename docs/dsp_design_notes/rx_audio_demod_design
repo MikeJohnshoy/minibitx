@@ -1,0 +1,244 @@
+# RX Audio Demodulation: Local CW Monitor Design
+
+Status: implemented (`rx_audio.c`/`rx_audio.h`, wired into `sound.c` — see
+§6 and [`../02_rx_processing_pipeline.md`](../02_rx_processing_pipeline.md)).
+First on-air confirmation (2026-09): copyable CW audio while tuning
+through FT8-band signals on 40m, after the AGC fix in §5. Known
+limitation not yet addressed: §7.
+
+## 1. Background
+
+minibitx's baseband I/Q (see
+[`../02_rx_processing_pipeline.md`](../02_rx_processing_pipeline.md)) has
+always had two consumers, both external: `hpsdr_p1.c` and `usb_gadget.c`'s
+UAC2 gadget, feeding a separate SDR application that does the actual
+demodulation. That means listening to the receiver has always required a
+second machine, or at least a second process, running something like
+FLRig/FLdigi/SDR Console. There was no way to tune to a CW signal and
+just hear it out of the box's own speaker.
+
+`rx_audio.c` closes that gap for the one mode minibitx already transmits
+— CW — without adding a new capture path or a second process fighting
+minibitx for the WM8731. It's a plain function call
+(`rx_audio_process()`) added to the same real-time audio callback that
+already produces `i_samples[]`/`q_samples[]` for the network consumers
+(`sound_process()`, `sound.c`), reusing that block directly.
+
+## 2. Why this lives inside minibitx, not the separate panel app
+
+A companion touchscreen app (`mb-radio`) is being built as a standalone
+process specifically so minibitx's own scope doesn't grow to include a
+GUI, encoders, or a waterfall display. RX audio demod is the one
+exception kept inside minibitx itself, for a structural reason rather
+than a scope one: minibitx already owns the WM8731 codec exclusively
+(see [`01_hardware_init_and_control.md`](../01_hardware_init_and_control.md)),
+and already has this exact block of I/Q sitting in memory, mid-callback,
+before it's even packaged for the network. A second process doing the
+same demodulation would need its own capture path into the same ALSA
+device minibitx already has open, and would add a full network
+round-trip of latency for something that's supposed to sound
+immediate. Putting it here instead costs one function call.
+
+## 3. The product detector
+
+The core technique is a standard product detector — the same idea a
+classic analog CW rig's BFO implements in hardware — split into two
+independent stages so "how narrow" and "what pitch" stay separate knobs:
+
+1. **Narrow the passband, at its original location.** `i_samples[]`/
+   `q_samples[]` arrive centered on dial center (0 Hz offset) — whatever
+   external control surface is tuning the radio (FLRig, for now; see
+   [`../04_remote_control_and_iq_output.md`](../04_remote_control_and_iq_output.md))
+   is expected to park the wanted signal there. A single-pole lowpass,
+   applied independently to the I and Q rails right at that point, is
+   what actually rejects everything else nearby — its cutoff
+   (`RX_AUDIO_FILTER_CUTOFF_HZ`, 150 Hz, untested starting point) *is*
+   the narrow-CW-filter width, a free parameter unlike an FFT bin's
+   fixed size.
+2. **Mix up to `CW_PITCH_HZ` and keep the real part.** `cw.h`'s
+   `CW_PITCH_HZ` (700 Hz) is the same pitch the TX sidetone already
+   uses, so RX and TX match. `Re[(I+jQ)(cos+jsin)] = I·cos − Q·sin`,
+   using `vfo_read_iq()` (`vfo.c`) for the mixing oscillator — no new
+   NCO code needed. A steady carrier sitting exactly at dial center
+   comes out as a steady 700 Hz tone, not silence, for the same reason
+   `cw.c`'s TX side never keys straight at 0 Hz either.
+
+Verified against synthetic I/Q before ever touching real hardware
+(`test_rx_audio.c`, not part of the build): a carrier at dial center
+produces a clean 698.3 Hz tone (target ~700 Hz); a carrier at +5kHz
+offset comes out attenuated relative to that. §5 covers what changed in
+that test once the AGC was added.
+
+## 4. Why an FFT wasn't used instead
+
+The initial idea was to take a 1024-point FFT of the I/Q and read off
+the bin(s) near the center. Two problems with that, worked out before
+writing any code:
+
+- **The bin math itself**: at minibitx's real 96,000 Hz sample rate, a
+  1024-point FFT gives 96000/1024 ≈ 93.75 Hz/bin — not the ~25kHz/bin
+  that was the original assumption.
+- **The bigger issue**: an FFT is a snapshot-per-block tool, good for a
+  waterfall display, but the wrong tool for producing *continuous*
+  demodulated audio — that would require an inverse FFT plus
+  overlap-add, and would be locked to the bin-width's granularity rather
+  than being continuously tunable. Worse, demodulating literally at the
+  center bin (0 Hz offset) produces silence for a steady carrier, not a
+  tone — mixing up to `CW_PITCH_HZ` first (§3) is what avoids that.
+
+A time-domain NCO-plus-filter product detector is the standard technique
+for exactly this job, is arbitrarily tunable, and needed no FFT at all.
+
+## 5. The AGC: why a fixed gain could not work
+
+v1 shipped with a fixed multiplier (`RX_AUDIO_PEAK_AMPLITUDE`, then
+200,000,000) turning the demodulated audio into a PCM sample, calibrated
+only against `test_rx_audio.c`'s synthetic, unit-amplitude carrier. That
+produced total silence on real hardware — not quiet, silence, no
+background hiss at all — and took several rounds of elimination to
+diagnose, because the actual bug turned out to be three bugs deep:
+
+1. **Stale local checkout.** The delivered `sound.c`/`minibitx.c` were
+   briefly rebased onto a copy of the repo that was ~50 commits behind
+   the real `origin/main`, including several of the user's own
+   in-progress edits. Caught via `git fetch`/`git merge-base
+   --is-ancestor` before anything was delivered; not a hardware issue at
+   all, just a process one, but it cost a round of back-and-forth.
+2. **The WM8731 `Master` control was hardcoded muted.** `setup_audio_codec()`
+   (`sound.c`) had `sound_mixer("hw:0", "Master", 0)` — literally
+   "Mute local speaker" in the original comment, from back when nothing
+   meaningful was ever written to that output. No amount of correct DSP
+   downstream could be audible with the analog output stage pinned to
+   zero. Fixed initially by raising the default; then found that
+   `radio.c`'s `radio_tx_apply()` *also* drove the same shared `Master`
+   control (to `TX_MASTER_VOL`, feeding the TX exciter) and re-muted it
+   on every RX return without ever restoring it — meaning RX audio (and
+   the CW sidetone) were only ever briefly audible during a TX burst
+   itself. The real, final fix (not a v1 detail, see §8) was
+   discovering `Master` has independent left/right volume registers and
+   splitting local-monitor level (left) from TX exciter drive (right)
+   entirely, so neither can step on the other again.
+3. **The actual bug**: even with `Master` correctly unmuted, a
+   bench-added diagnostic (temporary, since removed — printed peak I/Q
+   and peak PCM output once a second) showed real signal amplitude at
+   this point in the chain sitting around **0.0015–0.0085** of the
+   synthetic test's 1.0 reference — while tuned across live FT8-band
+   signals on 40m, 2026-09. That's 100-600x smaller than what
+   `RX_AUDIO_PEAK_AMPLITUDE` was calibrated against, producing peak PCM
+   output of only ~10,000–64,000 out of a possible 2 billion (roughly
+   -90 dBFS) — below the noise floor of the DAC, not just quiet.
+
+A fixed multiplier tuned for that measured range would also be wrong the
+moment the band got louder — real signal strength varies far more than
+any single constant can track, which is exactly the problem every real
+receiver's AGC (automatic gain control) exists to solve. `rx_audio.c`
+now runs the demodulated audio through an envelope-following AGC instead
+of a fixed gain:
+
+```c
+#define AGC_TARGET_AMPLITUDE 500000000.0  // ~23% of int32 full scale
+#define AGC_ATTACK_MS    5.0   // fast - catch a loud transient before it clips
+#define AGC_RELEASE_MS 300.0   // slow - don't pump between a CW dit and its gap
+#define AGC_MAX_GAIN 8.0e11    // ceiling so near-silence doesn't amplify toward infinity
+```
+
+An asymmetric single-pole envelope follower tracks `|audio|` (fast
+attack, slow release), and the applied gain is
+`AGC_TARGET_AMPLITUDE / envelope`, clamped at `AGC_MAX_GAIN`. Verified
+with an extended `test_rx_audio.c` before delivery: a case at the
+bench-measured real amplitude (0.003) now produces output
+indistinguishable from a full-scale (1.0) synthetic carrier — the exact
+regression the bug above represents — while a signal 5kHz outside the
+narrow filter still shows the expected ~-30dB down *in the AGC's
+internal envelope*, even though its eventual output loudness gets
+normalized like everything else (see §7 for why that specific interaction
+matters).
+
+## 6. Wiring into `sound.c`
+
+Three small, targeted additions, applied against `origin/main` directly
+rather than a stale local branch (see §5, item 1):
+
+```c
+// sound_process(), in place of the old memset(output_speaker, 0, ...):
+rx_audio_process(i_samples, q_samples, n_samples, output_speaker);
+```
+
+```c
+// audio_loop()'s playback fill, a new branch alongside the existing
+// cw_tx_active() one:
+} else if (!in_tx) {
+    for (int i = 0; i < n; i++) {
+        play_buf[i * 2] = spk_buf[i];      // rx_audio.c's demod tone
+        play_buf[i * 2 + 1] = 0;
+    }
+} else {
+    memset(play_buf, 0, (size_t)n * 2 * sizeof(int32_t)); // TX, not keyed
+}
+```
+
+`rx_audio_init()` is called once at startup (`minibitx.c`), right after
+`cw_init()` — it needs the same VFO phase table already built for that.
+
+## 7. Known limitation: symmetric response around zero beat
+
+Unlike sbitx's original receiver — which gets genuine single-sideband
+selectivity from its crystal filter's fixed, physically asymmetric skirt
+relative to the BFO (the same "filter method" used for TX sideband
+generation, see
+[`antialias_filter_design.md`](antialias_filter_design.md) §3) —
+`rx_audio.c`'s narrow filter (§3) is a plain real-coefficient lowpass,
+applied identically to the I and Q rails. Any filter built that way has
+a frequency response that's mirror-symmetric around 0 Hz: it cannot
+distinguish a signal 300 Hz above dial center from one 300 Hz below,
+because the physical asymmetry that gives sbitx's receiver its
+single-sided selectivity lives entirely in the analog IF chain, upstream
+of the wideband, symmetric I/Q this pipeline hands to `rx_audio.c` (the
+same I/Q the network SDR path uses).
+
+Practical effect: tuning across a CW station produces the expected pitch
+change through zero beat, but the signal sounds equally strong on both
+sides rather than being rejected on one — normal direct-conversion
+receiver behavior, but not what sbitx's real filter-based selectivity
+does.
+
+**Not yet built**: a genuine phasing-method single-sideband filter —
+shifting the wanted sideband to DC and filtering with a properly
+asymmetric (Hilbert-transform-related) pair of filters on I and Q,
+rather than the same real filter on both — would fix this. Deferred for
+now; flagged during on-air testing (2026-09) but not yet a blocker for
+basic CW copy.
+
+## 8. Master output split (L/R independence)
+
+Related fix, landed alongside the AGC work: the WM8731's `Master`
+control turned out to have independent left/right volume registers, and
+L/R physically feed two different destinations on this board — L drives
+the local speaker/headphone audio amp (`rx_audio.c`'s output, and
+`cw.c`'s TX sidetone), R drives the mainboard's diode mixer that
+upconverts the DSP's TX carrier for the RF chain. `sound_set_local_monitor()`
+now sets only the left channel, once, at startup, and is never touched
+again; `sound_set_tx_drive()` sets only the right channel, from
+`radio.c`'s `radio_tx_apply()`, for the duration of a TX burst. Before
+this, both shared one value, and every TX/RX transition would silently
+re-mute whichever purpose wasn't currently active — see §5, item 2, for
+the debugging trail this caused.
+
+## 9. What's not decided yet
+
+- **Filter cutoff and BFO sign** (`RX_AUDIO_FILTER_CUTOFF_HZ`, 150 Hz;
+  the sign passed to `vfo_start(&bfo, CW_PITCH_HZ, 0)`) are both
+  untested starting points, not bench calibrations — worth retuning by
+  ear now that audio is actually reaching a speaker.
+- **`AGC_TARGET_AMPLITUDE`/`AGC_ATTACK_MS`/`AGC_RELEASE_MS`** are
+  reasonable-looking starting points, not yet tuned against extended
+  listening — particularly whether 300ms release feels right between
+  CW characters, or pumps/lags noticeably.
+- **§7's single-sideband limitation** — whether it's worth the added
+  complexity of a proper phasing-method filter, or whether the simpler
+  symmetric filter is good enough for a "just get CW audio out of the
+  box" feature.
+- **Runtime control** — `rx_audio_set_volume()`/`rx_audio_set_filter_bw()`
+  exist but nothing calls them yet; wiring either to a future physical
+  volume/tuning encoder (the `mb-radio` panel app) or a CAT/rigctl
+  extension is unstarted.
