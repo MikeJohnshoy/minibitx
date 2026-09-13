@@ -33,10 +33,13 @@ int xtal_filter_center = 40012400;
 int bfo_freq = 40035000;
 struct vfo lo;
 
-// "Master" gates the WM8731's whole analog output path, which is what
-// actually feeds the exciter/PA during TX - not a volume knob (see
-// docs/03_tx_processing_pipeline.md's TX_MASTER_VOL bullet for the
-// sbitx-matching derivation of 95).
+// "Master"'s RIGHT channel (sound_set_tx_drive(), sound.c) is what
+// actually feeds the exciter/PA during TX - not a volume knob in the
+// usual sense, even though it's set via the same volume-percent
+// mechanism (see docs/03_tx_processing_pipeline.md's TX_MASTER_VOL
+// bullet for the sbitx-matching derivation of 95). LEFT is a completely
+// separate channel (the local speaker/headphone output) and is
+// unaffected by this.
 #define TX_MASTER_VOL 95
 
 void radio_tune_to(uint32_t f) {
@@ -82,9 +85,12 @@ static void radio_tx_apply(int tx_on) {
     radio_hw_set_ptt(1);
     usleep(20000); // let PTT assert before keying the relay
     radio_hw_set_tx_relay(1);
-    sound_mixer("hw:0", "Master", TX_MASTER_VOL); // feed the exciter
+    // Only the RIGHT channel of "Master" feeds the exciter - the LEFT
+    // channel (local speaker/headphone) is independent and is never
+    // touched here, see sound_set_tx_drive()'s comment (sound.c).
+    sound_set_tx_drive(TX_MASTER_VOL);
   } else {
-    sound_set_local_monitor(0); // mute before dropping the relay
+    sound_set_tx_drive(0); // mute the exciter feed before dropping the relay
     radio_hw_set_ptt(0);
     usleep(5000); // let the relay settle before dropping PTT
     radio_hw_set_tx_relay(0);
@@ -93,16 +99,13 @@ static void radio_tx_apply(int tx_on) {
     // separate radio_tune_to() call of its own to undo this.
     si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
     si5351bx_setfreq(2, freq_hdr + xtal_filter_center);
-    // Restore Capture and the local monitor output only now that the
-    // relay has actually settled - any earlier would feed the DSP chain
-    // raw relay-transient noise, or briefly unmute Master while the
-    // relay is still mid-transition. Without this second restore,
-    // Master stays at whatever radio_tx_apply() last set it to (0) for
-    // the rest of RX - rx_audio.c's demod and cw.c's sidetone would only
-    // ever be audible during the brief TX_MASTER_VOL window of a TX
-    // burst itself, never at rest in RX.
+    // Restore Capture only now that the relay has actually settled - any
+    // earlier would feed the DSP chain raw relay-transient noise. There
+    // is no equivalent local-monitor restore needed here: unlike the
+    // old shared-"Master" design, the local speaker/headphone (LEFT
+    // channel) was never touched by this function in the first place -
+    // see sound_set_local_monitor()'s comment (sound.c).
     sound_set_rx_capture(1);
-    sound_set_local_monitor(1);
   }
 }
 
