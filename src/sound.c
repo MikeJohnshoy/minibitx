@@ -7,6 +7,7 @@
 #include "hpsdr_p1.h"
 #include "hw_settings.h"
 #include "radio.h"
+#include "rx_audio.h"
 #include "sound.h"
 #include "usb_gadget.h"
 #include <alsa/asoundlib.h>
@@ -342,8 +343,11 @@ static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output
       uac_push_iq(out_i, out_q);
   }
 
-  // keep local outputs silent
-  memset(output_speaker, 0, n_samples * sizeof(int32_t));
+  // output_speaker carries the RX audio demod (rx_audio.c) - the
+  // receiver's own I/Q turned into an audible CW tone. output_tx
+  // stays silent here; it's only driven by the CW sidetone/TX-IF
+  // chain in audio_loop() below.
+  rx_audio_process(i_samples, q_samples, n_samples, output_speaker);
   memset(output_tx, 0, n_samples * sizeof(int32_t));
 }
 
@@ -434,7 +438,19 @@ static void *audio_loop(void *arg) {
           play_buf[i * 2] = (int32_t)raw_side;
           play_buf[i * 2 + 1] = (int32_t)raw_tx;
         }
+      } else if (!in_tx) {
+        // RX: play back rx_audio.c's demodulated CW tone (spk_buf)
+        // on the local monitor channel - same channel cw.c's TX
+        // sidetone uses. R stays silent; nothing drives the PA
+        // while RX.
+        for (int i = 0; i < n; i++) {
+          play_buf[i * 2] = spk_buf[i];
+          play_buf[i * 2 + 1] = 0;
+        }
       } else {
+        // in_tx but not cw_tx_active (e.g. PTT asserted between key
+        // presses, or via CAT/network MOX without a CW burst) - stay
+        // silent rather than play back RX audio while transmitting.
         memset(play_buf, 0, (size_t)n * 2 * sizeof(int32_t));
       }
       snd_pcm_sframes_t wframes = snd_pcm_writei(pcm_playback, play_buf, n);
