@@ -26,4 +26,14 @@ void setup_audio_codec(void);
    protects the ADC/DSP chain from TX energy. */
 void sound_set_rx_capture(int enable);
 
+/* Mute (enable=0) or restore (enable=1, back to LOCAL_SPEAKER_GAIN_PERCENT)
+   the WM8731 'Master' analog output path around a TX burst. Master gates
+   the whole analog output (see radio.c's TX_MASTER_VOL comment) and is
+   driven directly to TX_MASTER_VOL by radio_tx_apply() while
+   transmitting (feeding the exciter) - this only covers the RX side of
+   that same transition, so rx_audio.c's demod (and cw.c's sidetone, on
+   the next TX) are actually audible afterward instead of left muted at
+   whatever radio_tx_apply() set Master to mid-transition. */
+void sound_set_local_monitor(int enable);
+
 #endif /* SOUND_H */
