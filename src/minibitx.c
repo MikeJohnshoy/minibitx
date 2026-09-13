@@ -14,6 +14,7 @@
 #include "hamlib.h"
 #include "hw_settings.h"
 #include "cw.h"
+#include "rx_audio.h"
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
@@ -111,7 +112,14 @@ int main(int argc, char **argv) {
   // already built, since it starts its software oscillator.
   cw_init();
   printf("init: CW straight key ready (GPIO %d)\n", CW_KEY);
- 
+
+  // RX audio demod (src/rx_audio.c) - turns the receiver's own I/Q into
+  // an audible CW tone on the local monitor output. Needs the phase
+  // table above already built, same as cw_init(); no hardware of its
+  // own to fail to open, so nothing to report but success.
+  rx_audio_init();
+  printf("init: RX audio demod ready (CW pitch %d Hz)\n", CW_PITCH_HZ);
+
   // Bring up the rigctld-compatible control surface (src/hamlib.c) first -
   // not a hard failure if the port's unavailable, same as HPSDR/UAC2.
   // hamlib_init() reports its own success; we only report the failure
@@ -197,4 +205,3 @@ int main(int argc, char **argv) {
   printf("minibitx: shutdown complete.\n");
   return 0;
 }
- 
