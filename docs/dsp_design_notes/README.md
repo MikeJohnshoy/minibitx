@@ -38,5 +38,9 @@ already used in `antialias_filter_design.md`.
   a fixed output gain couldn't work once real signal levels were
   measured on the bench (and the AGC that replaced it), the WM8731
   `Master` L/R independence fix that came out of the same debugging
-  session, and the known symmetric-response-around-zero-beat limitation.
-  Status: implemented, first on-air CW copy confirmed (2026-09).
+  session, and the complex (Hilbert-style) bandpass filter that later
+  fixed v1's symmetric-response-around-zero-beat limitation. Status:
+  implemented; first on-air CW copy confirmed (2026-09) against v1's
+  filter, the v2 image-reject filter bench-verified numerically (design
+  prediction and compiled-C measurement match to the first decimal
+  place) but not yet re-confirmed on air.
