@@ -45,6 +45,16 @@
 // some future signal ever proves it too hot.
 #define RX_CAPTURE_GAIN_PERCENT 70
 
+// WM8731 'Master' - the analog gain stage on the local speaker/headphone
+// output, same percent-onto-raw-range mapping as RX_CAPTURE_GAIN_PERCENT
+// above. Used to be hardcoded to 0 (fully muted) here, from back when
+// nothing meaningful was ever written to that output - cw.c's TX
+// sidetone and, now, rx_audio.c's RX demod both depend on this being
+// nonzero to be audible at all. 70 is an untuned starting point, not a
+// bench calibration - adjust to taste once there's a speaker to listen
+// to it on.
+#define LOCAL_SPEAKER_GAIN_PERCENT 70
+
 /* ------------------------------------------------------------------ */
 /*  TX sample scaling - see docs/03_tx_processing_pipeline.md          */
 /*  "Adjusting power levels" for what each constant means and the      */
@@ -116,7 +126,7 @@ void setup_audio_codec(void) {
   sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON); // just un-mutes the line path - see comment above
   sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain stage
   sound_mixer("hw:0", "Mic", 0);
-  sound_mixer("hw:0", "Master", 0); // Mute local speaker
+  sound_mixer("hw:0", "Master", LOCAL_SPEAKER_GAIN_PERCENT); // local speaker/headphone output - see LOCAL_SPEAKER_GAIN_PERCENT above
   sound_mixer("hw:0", "Output Mixer HiFi", 1);
   sound_mixer("hw:0", "Output Mixer Line Bypass", 0);
   sound_mixer("hw:0", "Output Mixer Mic Sidetone", 0);
@@ -129,6 +139,19 @@ void setup_audio_codec(void) {
 // exact ordering this depends on.
 void sound_set_rx_capture(int enable) {
   sound_mixer("hw:0", "Capture", enable ? RX_CAPTURE_GAIN_PERCENT : 0);
+}
+
+// Mute/restore the WM8731 'Master' analog output path around a TX burst -
+// mirrors sound_set_rx_capture() above, but for the local speaker/
+// headphone output. radio.c's radio_tx_apply() drives Master straight to
+// TX_MASTER_VOL while transmitting (feeding the exciter) and mutes it
+// back to 0 as the relay drops - this restores it to
+// LOCAL_SPEAKER_GAIN_PERCENT once RX is fully settled, which
+// radio_tx_apply() previously never did, leaving Master (and therefore
+// rx_audio.c's demod and cw.c's sidetone) muted for the rest of RX after
+// the very first TX/RX cycle.
+void sound_set_local_monitor(int enable) {
+  sound_mixer("hw:0", "Master", enable ? LOCAL_SPEAKER_GAIN_PERCENT : 0);
 }
 
 /* ------------------------------------------------------------------ */
