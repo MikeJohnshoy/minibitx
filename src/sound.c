@@ -45,14 +45,25 @@
 // some future signal ever proves it too hot.
 #define RX_CAPTURE_GAIN_PERCENT 70
 
-// WM8731 'Master' - the analog gain stage on the local speaker/headphone
-// output, same percent-onto-raw-range mapping as RX_CAPTURE_GAIN_PERCENT
-// above. Used to be hardcoded to 0 (fully muted) here, from back when
-// nothing meaningful was ever written to that output - cw.c's TX
-// sidetone and, now, rx_audio.c's RX demod both depend on this being
-// nonzero to be audible at all. 70 is an untuned starting point, not a
-// bench calibration - adjust to taste once there's a speaker to listen
-// to it on.
+// WM8731 'Master' is a stereo control with independent L/R volume
+// registers (confirmed both from the sbitx hardware docs and from
+// sound_mixer_dump()'s readback) - and L/R genuinely go to two different
+// physical destinations here, not two speakers of the same signal:
+//   L (FRONT_LEFT):  local speaker/headphone audio amp - cw.c's TX
+//                     sidetone and rx_audio.c's RX demod.
+//   R (FRONT_RIGHT): the mainboard's diode mixer, which upconverts the
+//                     DSP's low-IF TX carrier for the actual RF chain -
+//                     see TX_MASTER_VOL below.
+// There is no reason these should ever have shared one gain value, which
+// is exactly the bug the old shared, single-value "Master" control had:
+// every TX/RX transition clobbered whichever of these two purposes
+// wasn't currently active. LOCAL_SPEAKER_GAIN_PERCENT only ever governs
+// the L channel now, set once at startup (see setup_audio_codec()) and
+// never touched again - not muted/restored around TX like the R channel
+// legitimately needs to be (see sound_set_tx_drive() and radio.c's
+// TX_MASTER_VOL). 70 is an untuned starting point, not a bench
+// calibration - adjust to taste once there's a speaker to listen to it
+// on.
 #define LOCAL_SPEAKER_GAIN_PERCENT 70
 
 /* ------------------------------------------------------------------ */
@@ -97,22 +108,139 @@ void sound_mixer(char *card_name, char *element, int make_on) {
   snd_mixer_elem_t *elem = snd_mixer_find_selem(handle, sid);
 
   if (!elem) {
+    // Silent no-op used to hide a real class of bug: a misspelled or
+    // absent element name here means every call below is a no-op that
+    // *looks* like it succeeded - see sound_mixer_dump() below for a
+    // way to actually check what an element supports on a given board.
+    fprintf(stderr,
+            "sound_mixer: '%s' not found on %s (check `amixer -c 0 scontrols`)\n",
+            element, card_name);
     snd_mixer_close(handle);
     return;
   }
 
+  // Independent ifs, not else-if: a single ALSA "simple" element can
+  // combine a mute switch AND a volume control - true of most
+  // headphone/speaker outputs (e.g. "Master" here), which pairs a
+  // "Playback Volume" register with a separate mute bit under one
+  // simple-mixer name. Treating switch and volume as mutually exclusive
+  // (the previous else-if chain) meant an element with both only ever
+  // got its switch toggled - the volume register was silently never
+  // touched, left wherever the codec's power-on reset put it, no matter
+  // what percent was asked for. Every capability the element actually
+  // has now gets set.
+  if (snd_mixer_selem_has_playback_switch(elem))
+    snd_mixer_selem_set_playback_switch_all(elem, make_on != 0);
   if (snd_mixer_selem_has_capture_switch(elem))
-    snd_mixer_selem_set_capture_switch_all(elem, make_on);
-  else if (snd_mixer_selem_has_playback_switch(elem))
-    snd_mixer_selem_set_playback_switch_all(elem, make_on);
-  else if (snd_mixer_selem_has_playback_volume(elem)) {
+    snd_mixer_selem_set_capture_switch_all(elem, make_on != 0);
+  if (snd_mixer_selem_has_playback_volume(elem)) {
     snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
     snd_mixer_selem_set_playback_volume_all(elem, make_on * max / 100);
-  } else if (snd_mixer_selem_has_capture_volume(elem)) {
+  }
+  if (snd_mixer_selem_has_capture_volume(elem)) {
     snd_mixer_selem_get_capture_volume_range(elem, &min, &max);
     snd_mixer_selem_set_capture_volume_all(elem, make_on * max / 100);
-  } else if (snd_mixer_selem_is_enumerated(elem))
+  }
+  if (snd_mixer_selem_is_enumerated(elem))
     snd_mixer_selem_set_enum_item(elem, 0, make_on);
+
+  snd_mixer_close(handle);
+}
+
+// One-shot diagnostic dump of a mixer element's actual capabilities and
+// current value(s) - not part of the normal control-setting path above,
+// just a way to print ground truth about what a given ALSA element
+// really supports on this specific board/kernel, since a wrong name or
+// an unexpected capability combination otherwise fails (or half-
+// succeeds) silently. Called once after setup_audio_codec() below for
+// "Master" - safe to call anywhere else too, e.g. from a debugging
+// session, since it opens/closes its own mixer handle each time.
+void sound_mixer_dump(char *card_name, char *element) {
+  snd_mixer_t *handle;
+  snd_mixer_selem_id_t *sid;
+
+  snd_mixer_open(&handle, 0);
+  snd_mixer_attach(handle, card_name);
+  snd_mixer_selem_register(handle, NULL, NULL);
+  snd_mixer_load(handle);
+
+  snd_mixer_selem_id_alloca(&sid);
+  snd_mixer_selem_id_set_index(sid, 0);
+  snd_mixer_selem_id_set_name(sid, element);
+  snd_mixer_elem_t *elem = snd_mixer_find_selem(handle, sid);
+
+  if (!elem) {
+    fprintf(stderr, "sound_mixer_dump: '%s' not found on %s\n", element, card_name);
+    snd_mixer_close(handle);
+    return;
+  }
+
+  fprintf(stderr,
+          "sound_mixer_dump: %s/%s - playback_volume=%d playback_switch=%d "
+          "capture_volume=%d capture_switch=%d enumerated=%d\n",
+          card_name, element, snd_mixer_selem_has_playback_volume(elem),
+          snd_mixer_selem_has_playback_switch(elem),
+          snd_mixer_selem_has_capture_volume(elem),
+          snd_mixer_selem_has_capture_switch(elem),
+          snd_mixer_selem_is_enumerated(elem));
+
+  if (snd_mixer_selem_has_playback_volume(elem)) {
+    long min, max, val_l = -1, val_r = -1;
+    snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
+    snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, &val_l);
+    snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_RIGHT, &val_r);
+    fprintf(stderr, "  playback volume: L=%ld R=%ld (range %ld-%ld)\n",
+            val_l, val_r, min, max);
+  }
+  if (snd_mixer_selem_has_playback_switch(elem)) {
+    int val = -1;
+    snd_mixer_selem_get_playback_switch(elem, SND_MIXER_SCHN_FRONT_LEFT, &val);
+    fprintf(stderr, "  playback switch: %s\n", val ? "on" : "off");
+  }
+
+  snd_mixer_close(handle);
+}
+
+// Sets one stereo channel of a playback-volume element independently -
+// unlike sound_mixer()'s *_all() calls, which drive L and R together.
+// "Master" is the reason this exists: its L and R outputs feed two
+// completely different physical destinations (see LOCAL_SPEAKER_GAIN_
+// PERCENT's comment above), so they need independent gain, not a shared
+// one. Falls back to doing nothing (with a warning) if the element turns
+// out not to have a playback volume at all - see sound_mixer_dump() to
+// check that assumption on a given board.
+static void sound_mixer_channel(char *card_name, char *element,
+                                 snd_mixer_selem_channel_id_t channel,
+                                 int percent) {
+  long min, max;
+  snd_mixer_t *handle;
+  snd_mixer_selem_id_t *sid;
+
+  snd_mixer_open(&handle, 0);
+  snd_mixer_attach(handle, card_name);
+  snd_mixer_selem_register(handle, NULL, NULL);
+  snd_mixer_load(handle);
+
+  snd_mixer_selem_id_alloca(&sid);
+  snd_mixer_selem_id_set_index(sid, 0);
+  snd_mixer_selem_id_set_name(sid, element);
+  snd_mixer_elem_t *elem = snd_mixer_find_selem(handle, sid);
+
+  if (!elem) {
+    fprintf(stderr, "sound_mixer_channel: '%s' not found on %s\n", element, card_name);
+    snd_mixer_close(handle);
+    return;
+  }
+
+  if (snd_mixer_selem_has_playback_volume(elem)) {
+    snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
+    snd_mixer_selem_set_playback_volume(elem, channel, percent * max / 100);
+  } else {
+    fprintf(stderr,
+            "sound_mixer_channel: '%s' on %s has no playback volume - "
+            "per-channel level not applied\n",
+            element, card_name);
+  }
 
   snd_mixer_close(handle);
 }
@@ -126,10 +254,26 @@ void setup_audio_codec(void) {
   sound_mixer("hw:0", "Line", RX_LINE_INPUT_ON); // just un-mutes the line path - see comment above
   sound_mixer("hw:0", "Capture", RX_CAPTURE_GAIN_PERCENT); // the real analog gain stage
   sound_mixer("hw:0", "Mic", 0);
-  sound_mixer("hw:0", "Master", LOCAL_SPEAKER_GAIN_PERCENT); // local speaker/headphone output - see LOCAL_SPEAKER_GAIN_PERCENT above
+
+  // "Master" L/R are independent - see LOCAL_SPEAKER_GAIN_PERCENT's
+  // comment above. L (local speaker/headphone) is set once, here, for
+  // good - nothing in the TX path touches it again, though
+  // sound_set_local_monitor() below is there for a future real volume
+  // control. R (the exciter feed) starts muted; radio.c's
+  // radio_tx_apply() is the only thing that ever raises it, only for the
+  // duration of an actual TX burst - see sound_set_tx_drive() below.
+  sound_set_local_monitor(LOCAL_SPEAKER_GAIN_PERCENT);
+  sound_mixer_channel("hw:0", "Master", SND_MIXER_SCHN_FRONT_RIGHT, 0);
+
   sound_mixer("hw:0", "Output Mixer HiFi", 1);
   sound_mixer("hw:0", "Output Mixer Line Bypass", 0);
   sound_mixer("hw:0", "Output Mixer Mic Sidetone", 0);
+
+  // Temporary diagnostic - prints what "Master" actually supports and
+  // its current L/R values right after the two lines above. Delete once
+  // rx_audio.c/cw.c's local monitor output and the TX exciter drive are
+  // both confirmed independently correct.
+  sound_mixer_dump("hw:0", "Master");
 }
 
 // Mute/restore the WM8731 'Capture' gain around a TX burst - called
@@ -141,17 +285,27 @@ void sound_set_rx_capture(int enable) {
   sound_mixer("hw:0", "Capture", enable ? RX_CAPTURE_GAIN_PERCENT : 0);
 }
 
-// Mute/restore the WM8731 'Master' analog output path around a TX burst -
-// mirrors sound_set_rx_capture() above, but for the local speaker/
-// headphone output. radio.c's radio_tx_apply() drives Master straight to
-// TX_MASTER_VOL while transmitting (feeding the exciter) and mutes it
-// back to 0 as the relay drops - this restores it to
-// LOCAL_SPEAKER_GAIN_PERCENT once RX is fully settled, which
-// radio_tx_apply() previously never did, leaving Master (and therefore
-// rx_audio.c's demod and cw.c's sidetone) muted for the rest of RX after
-// the very first TX/RX cycle.
-void sound_set_local_monitor(int enable) {
-  sound_mixer("hw:0", "Master", enable ? LOCAL_SPEAKER_GAIN_PERCENT : 0);
+// Sets "Master"'s LEFT channel only - the local speaker/headphone output
+// (see LOCAL_SPEAKER_GAIN_PERCENT's comment above). setup_audio_codec()
+// calls this once at startup and nothing else calls it today; exposed as
+// a real percent-taking function (not just an on/off enable) so a future
+// physical volume control has a natural place to plug in, without
+// needing to touch anything TX-related.
+void sound_set_local_monitor(int percent) {
+  sound_mixer_channel("hw:0", "Master", SND_MIXER_SCHN_FRONT_LEFT, percent);
+}
+
+// Sets "Master"'s RIGHT channel only - the exciter feed (see
+// LOCAL_SPEAKER_GAIN_PERCENT's comment above for why this is the right
+// channel and not the whole control). Called from radio.c's
+// radio_tx_apply() with TX_MASTER_VOL while transmitting and 0 as the
+// relay drops. Deliberately leaves the LEFT channel (local speaker/
+// headphone - cw.c's sidetone, rx_audio.c's RX demod) completely alone;
+// unlike the old shared-"Master" design, there's no restore-after-TX
+// step needed here because nothing about TX ever touches it in the
+// first place.
+void sound_set_tx_drive(int percent) {
+  sound_mixer_channel("hw:0", "Master", SND_MIXER_SCHN_FRONT_RIGHT, percent);
 }
 
 /* ------------------------------------------------------------------ */
