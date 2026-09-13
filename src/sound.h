@@ -15,6 +15,12 @@ void sound_thread_stop(void);
    Handles switches, volumes, and enumerated controls. */
 void sound_mixer(char *card_name, char *element, int make_on);
 
+/* Diagnostic: prints an element's actual capabilities (playback/capture
+   volume and switch, enumerated) and current value(s) to stderr. Not
+   part of normal setup - a way to check ground truth on a given board
+   when a control silently doesn't behave as expected. */
+void sound_mixer_dump(char *card_name, char *element);
+
 /* Barebones WM8731 codec setup (input mux, levels, mute local speaker).
    Call once, after the ALSA devices are otherwise ready. */
 void setup_audio_codec(void);
@@ -26,14 +32,20 @@ void setup_audio_codec(void);
    protects the ADC/DSP chain from TX energy. */
 void sound_set_rx_capture(int enable);
 
-/* Mute (enable=0) or restore (enable=1, back to LOCAL_SPEAKER_GAIN_PERCENT)
-   the WM8731 'Master' analog output path around a TX burst. Master gates
-   the whole analog output (see radio.c's TX_MASTER_VOL comment) and is
-   driven directly to TX_MASTER_VOL by radio_tx_apply() while
-   transmitting (feeding the exciter) - this only covers the RX side of
-   that same transition, so rx_audio.c's demod (and cw.c's sidetone, on
-   the next TX) are actually audible afterward instead of left muted at
-   whatever radio_tx_apply() set Master to mid-transition. */
-void sound_set_local_monitor(int enable);
+/* Sets the WM8731 'Master' control's LEFT channel only (0-100), the
+   local speaker/headphone output - cw.c's TX sidetone and rx_audio.c's
+   RX demod. 'Master' has independent L/R volume registers, and L/R go
+   to two different physical destinations on this board (L: local audio
+   amp, R: the mainboard's TX exciter feed - see sound_set_tx_drive()) -
+   so this never needs to be muted/restored around a TX burst the way
+   sound_set_rx_capture() does. setup_audio_codec() calls this once at
+   startup; exposed publicly for a future real volume control. */
+void sound_set_local_monitor(int percent);
+
+/* Sets 'Master's RIGHT channel only (0-100) - the exciter feed. Called
+   from radio.c's radio_tx_apply() with TX_MASTER_VOL while transmitting
+   and 0 as the relay drops on every TX/RX transition; deliberately
+   leaves the LEFT channel (sound_set_local_monitor(), above) untouched. */
+void sound_set_tx_drive(int percent);
 
 #endif /* SOUND_H */
