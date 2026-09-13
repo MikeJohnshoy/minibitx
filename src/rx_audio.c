@@ -43,6 +43,7 @@
 #include "cw.h"
 #include "vfo.h"
 #include <math.h>
+#include <stdio.h>
 
 #define SAMPLE_RATE_HZ 96000
 
@@ -112,12 +113,31 @@ void rx_audio_set_filter_bw(int cutoff_hz) {
 
 void rx_audio_process(const double *i_samples, const double *q_samples,
                        int n, int32_t *out) {
+    // Temporary diagnostic - the whole v1 calibration (RX_AUDIO_FILTER_
+    // CUTOFF_HZ, RX_AUDIO_PEAK_AMPLITUDE) was only ever checked against
+    // a synthetic, unit-amplitude test signal (test_rx_audio.c), never
+    // against what a real received signal's i_samples/q_samples
+    // actually look like at this point in the chain - if that's
+    // meaningfully smaller than 1.0, a fixed RX_AUDIO_PEAK_AMPLITUDE
+    // multiplier could legitimately be producing an inaudibly small
+    // (or, after rounding, literally zero) out[] regardless of whether
+    // any of the DSP logic itself is correct. Printed roughly once a
+    // second (not per-block) so it doesn't flood the console. Delete
+    // once real signal levels here are known and RX_AUDIO_PEAK_AMPLITUDE
+    // is calibrated against them instead of guessed.
+    static double dbg_peak_in = 0.0;
+    static double dbg_peak_out = 0.0;
+    static int dbg_block_count = 0;
+
     for (int k = 0; k < n; k++) {
         // Stage 1: narrow the passband down around dial center, before
         // moving anything - see the file header for why this has to
         // happen first, at the signal's original location.
         double fi = onepole_apply(&lp_i, i_samples[k]);
         double fq = onepole_apply(&lp_q, q_samples[k]);
+
+        if (fabs(i_samples[k]) > dbg_peak_in) dbg_peak_in = fabs(i_samples[k]);
+        if (fabs(q_samples[k]) > dbg_peak_in) dbg_peak_in = fabs(q_samples[k]);
 
         // Stage 2: mix up to CW_PITCH_HZ and keep only the real part.
         // Re[(fi + j*fq) * (cos + j*sin)] = fi*cos - fq*sin.
@@ -131,5 +151,20 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
         if (sample >  2000000000.0) sample =  2000000000.0;
         if (sample < -2000000000.0) sample = -2000000000.0;
         out[k] = (int32_t)sample;
+
+        if (fabs(sample) > dbg_peak_out) dbg_peak_out = fabs(sample);
+    }
+
+    // n is one audio block (~10.7ms at 96kHz/1024 samples) - print
+    // roughly once a second, i.e. every ~94 blocks.
+    dbg_block_count++;
+    if (dbg_block_count >= 94) {
+        fprintf(stderr,
+                "rx_audio: peak input I/Q=%.6f (of 1.0 full scale), "
+                "peak output=%.0f (of 2e9 full scale), volume=%.2f\n",
+                dbg_peak_in, dbg_peak_out, rx_volume);
+        dbg_block_count = 0;
+        dbg_peak_in = 0.0;
+        dbg_peak_out = 0.0;
     }
 }
