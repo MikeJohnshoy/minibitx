@@ -15,10 +15,12 @@ void rx_audio_init(void);
 // 0-100. Scales the demodulated audio before it reaches the codec.
 void rx_audio_set_volume(int percent);
 
-// Narrows or widens the CW filter around dial center (roughly
-// +-cutoff_hz passband) - see rx_audio.c for the current default and
-// the reasoning behind it.
-void rx_audio_set_filter_bw(int cutoff_hz);
+// v1 had a runtime-adjustable filter cutoff here (rx_audio_set_filter_bw()).
+// The narrow filter is now a fixed-coefficient complex FIR (like
+// antialias.c's filter) rather than a single tunable one-pole lowpass, so
+// there's no longer a single "cutoff" knob to expose - see rx_audio.c and
+// docs/dsp_design_notes/rx_audio_demod_design.md §7 for the current design
+// and what would need to change to make it runtime-adjustable again.
 
 // Demodulates one block's worth of already-mixed baseband I/Q (the same
 // i_samples[]/q_samples[] sound.c's sound_process() already computes for
