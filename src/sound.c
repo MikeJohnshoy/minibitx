@@ -268,12 +268,6 @@ void setup_audio_codec(void) {
   sound_mixer("hw:0", "Output Mixer HiFi", 1);
   sound_mixer("hw:0", "Output Mixer Line Bypass", 0);
   sound_mixer("hw:0", "Output Mixer Mic Sidetone", 0);
-
-  // Temporary diagnostic - prints what "Master" actually supports and
-  // its current L/R values right after the two lines above. Delete once
-  // rx_audio.c/cw.c's local monitor output and the TX exciter drive are
-  // both confirmed independently correct.
-  sound_mixer_dump("hw:0", "Master");
 }
 
 // Mute/restore the WM8731 'Capture' gain around a TX burst - called
