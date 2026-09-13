@@ -31,13 +31,20 @@
 //      center comes out as a steady CW_PITCH_HZ tone - not silence,
 //      for the same reason cw.c's TX side never keys straight at 0 Hz
 //      either (see cw.h's CW_PITCH_HZ comment).
+//   3. Run the result through an AGC (envelope-following automatic gain
+//      control) that normalizes toward a fixed target output level -
+//      see AGC_TARGET_AMPLITUDE below for why a fixed multiplier alone
+//      doesn't work: real signal amplitude at this point in the chain
+//      (bench-measured, see that comment) varies far more than any one
+//      constant could cover without either being silent on a weak
+//      signal or clipping on a strong one.
 //
 // v1's filter is deliberately a single-pole (6dB/octave) lowpass, not a
 // sharp multi-pole/FIR design - the simplest thing that actually works,
-// to get the whole chain proven on the bench first. None of the
-// constants below are bench-verified yet (this file has never been run
-// against a real signal) - expect to retune RX_AUDIO_FILTER_CUTOFF_HZ,
-// RX_AUDIO_PEAK_AMPLITUDE, and possibly the BFO's sign once it is.
+// to get the whole chain proven on the bench first. RX_AUDIO_FILTER_
+// CUTOFF_HZ and the BFO's sign are still bench-unverified starting
+// points - expect to retune/flip them once there's a real signal to
+// judge by ear.
 
 #include "rx_audio.h"
 #include "cw.h"
@@ -55,11 +62,38 @@
 // sounds right on the bench.
 #define RX_AUDIO_FILTER_CUTOFF_HZ 150
 
-// Peak PCM amplitude at 100% volume - same role as sound.c's
-// SIDETONE_PEAK_AMPLITUDE. Bench-unverified starting point; the right
-// value depends on how much a real received signal's amplitude survives
-// down to this stage, which nothing has measured yet.
-#define RX_AUDIO_PEAK_AMPLITUDE 200000000.0
+// v1 shipped with a fixed peak-PCM-amplitude multiplier here (the same
+// role as sound.c's SIDETONE_PEAK_AMPLITUDE), calibrated only against a
+// synthetic, unit-amplitude test carrier (test_rx_audio.c). Bench data
+// off a real antenna (FT8 band noise/signals on 40m, 2025-09) showed the
+// actual post-mix signal sitting around 0.0015-0.0085 of that synthetic
+// 1.0 reference - a fixed multiplier tuned for one of those scales is
+// either silent on the other or clips on anything stronger, and real
+// band conditions swing far wider than either bench sample. An AGC
+// (automatic gain control) is the standard fix, and what every real
+// receiver does for this same reason - it normalizes toward a target
+// output level regardless of how strong the incoming signal actually is,
+// rather than assuming one fixed relationship between input and output
+// amplitude.
+//
+// Target output amplitude the AGC rides toward, once its envelope
+// estimate has settled - comfortably below the +-2e9 clamp so real
+// peaks (louder than the envelope's own smoothed average) still fit
+// without clipping.
+#define AGC_TARGET_AMPLITUDE 500000000.0
+
+// Fast attack (catch a loud transient - a strong signal keying up -
+// before it clips) and slow release (ride the overall band-noise/signal
+// level rather than pumping between a CW dit and the gap after it).
+// Untested starting points, same caveat as the filter cutoff below.
+#define AGC_ATTACK_MS    5.0
+#define AGC_RELEASE_MS 300.0
+
+// Ceiling on the gain the AGC can apply - without this, near-total
+// silence (envelope estimate near 0) would drive gain toward infinity
+// and turn the noise floor into full-scale hiss the moment the band
+// goes quiet.
+#define AGC_MAX_GAIN 8.0e11
 
 #define RX_AUDIO_FILTER_MIN_HZ   20    // don't let the passband collapse to nothing
 #define RX_AUDIO_FILTER_MAX_HZ 2000    // don't let it swallow the whole thing either
@@ -72,6 +106,13 @@ struct onepole_lp {
 static struct vfo bfo;                 // CW_PITCH_HZ mixing oscillator
 static struct onepole_lp lp_i, lp_q;   // narrow-filter state, one per rail
 static double rx_volume = 0.5;         // 0.0-1.0 - see rx_audio_set_volume()
+
+// AGC envelope follower state - agc_env tracks a smoothed |audio|
+// estimate; the gain applied each sample is AGC_TARGET_AMPLITUDE /
+// agc_env, so as agc_env rises/falls the output rides back toward the
+// target instead of tracking the raw input amplitude directly.
+static double agc_env = 0.0;
+static double agc_attack_alpha, agc_release_alpha;
 
 static double onepole_apply(struct onepole_lp *f, double x) {
     f->y += f->alpha * (x - f->y);
@@ -87,6 +128,15 @@ static void onepole_set_cutoff(struct onepole_lp *f, int cutoff_hz) {
     f->alpha = dt / (rc + dt);
 }
 
+// Time-constant (not cutoff-frequency) version of the same one-pole
+// coefficient, for the AGC's attack/release smoothing below - alpha such
+// that a step input reaches ~63% of the way there after time_ms.
+static double onepole_alpha_from_ms(double time_ms) {
+    double dt = 1.0 / (double)SAMPLE_RATE_HZ;
+    double tau = time_ms / 1000.0;
+    return 1.0 - exp(-dt / tau);
+}
+
 void rx_audio_init(void) {
     // BFO sign is a starting guess, not bench-verified - if a station
     // parked exactly at dial center sounds wrong (e.g. tuning direction
@@ -96,6 +146,10 @@ void rx_audio_init(void) {
     onepole_set_cutoff(&lp_q, RX_AUDIO_FILTER_CUTOFF_HZ);
     lp_i.y = 0.0;
     lp_q.y = 0.0;
+
+    agc_attack_alpha  = onepole_alpha_from_ms(AGC_ATTACK_MS);
+    agc_release_alpha = onepole_alpha_from_ms(AGC_RELEASE_MS);
+    agc_env = 0.0;
 }
 
 void rx_audio_set_volume(int percent) {
@@ -111,20 +165,16 @@ void rx_audio_set_filter_bw(int cutoff_hz) {
     onepole_set_cutoff(&lp_q, cutoff_hz);
 }
 
+double rx_audio_debug_agc_envelope(void) {
+    return agc_env;
+}
+
 void rx_audio_process(const double *i_samples, const double *q_samples,
                        int n, int32_t *out) {
-    // Temporary diagnostic - the whole v1 calibration (RX_AUDIO_FILTER_
-    // CUTOFF_HZ, RX_AUDIO_PEAK_AMPLITUDE) was only ever checked against
-    // a synthetic, unit-amplitude test signal (test_rx_audio.c), never
-    // against what a real received signal's i_samples/q_samples
-    // actually look like at this point in the chain - if that's
-    // meaningfully smaller than 1.0, a fixed RX_AUDIO_PEAK_AMPLITUDE
-    // multiplier could legitimately be producing an inaudibly small
-    // (or, after rounding, literally zero) out[] regardless of whether
-    // any of the DSP logic itself is correct. Printed roughly once a
-    // second (not per-block) so it doesn't flood the console. Delete
-    // once real signal levels here are known and RX_AUDIO_PEAK_AMPLITUDE
-    // is calibrated against them instead of guessed.
+    // Diagnostic - confirms the AGC is actually riding output toward
+    // AGC_TARGET_AMPLITUDE rather than tracking the raw (and, per bench
+    // data, tiny and wildly variable) input amplitude. Printed roughly
+    // once a second (not per-block) so it doesn't flood the console.
     static double dbg_peak_in = 0.0;
     static double dbg_peak_out = 0.0;
     static int dbg_block_count = 0;
@@ -147,7 +197,21 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
         double s = (double)bfo_sin / 1073741824.0;
         double audio = fi * c - fq * s;
 
-        double sample = audio * rx_volume * RX_AUDIO_PEAK_AMPLITUDE;
+        // Stage 3: AGC - track a smoothed envelope of |audio| (fast
+        // attack so a strong signal keying up doesn't clip before the
+        // envelope catches up, slow release so gain doesn't pump on
+        // every CW dit/dah gap), then scale so the envelope itself sits
+        // at AGC_TARGET_AMPLITUDE regardless of how large or small the
+        // raw input actually is - see the constants above for why a
+        // fixed multiplier alone can't work here.
+        double mag = fabs(audio);
+        double alpha = (mag > agc_env) ? agc_attack_alpha : agc_release_alpha;
+        agc_env += alpha * (mag - agc_env);
+
+        double gain = AGC_TARGET_AMPLITUDE / (agc_env > 1e-9 ? agc_env : 1e-9);
+        if (gain > AGC_MAX_GAIN) gain = AGC_MAX_GAIN;
+
+        double sample = audio * gain * rx_volume;
         if (sample >  2000000000.0) sample =  2000000000.0;
         if (sample < -2000000000.0) sample = -2000000000.0;
         out[k] = (int32_t)sample;
@@ -161,8 +225,9 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
     if (dbg_block_count >= 94) {
         fprintf(stderr,
                 "rx_audio: peak input I/Q=%.6f (of 1.0 full scale), "
-                "peak output=%.0f (of 2e9 full scale), volume=%.2f\n",
-                dbg_peak_in, dbg_peak_out, rx_volume);
+                "AGC envelope=%.6f, peak output=%.0f (of 2e9 full scale), "
+                "volume=%.2f\n",
+                dbg_peak_in, agc_env, dbg_peak_out, rx_volume);
         dbg_block_count = 0;
         dbg_peak_in = 0.0;
         dbg_peak_out = 0.0;
