@@ -65,8 +65,6 @@ network-facing consumers) is
              needed (dsp_design_notes/rx_audio_demod_design.md)
 ```
 
-Two mixer stages, two si5351 clocks, two different jobs.
-
 ## Stage by stage
 At each stage we can look at an example following a single CW signal
 at 7030000 as it flows from the antenna through to I&Q outuput.
