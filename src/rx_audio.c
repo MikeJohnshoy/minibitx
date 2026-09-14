@@ -267,18 +267,26 @@ static void ssb_filter_apply(struct ssb_filter_state *f, double i_in, double q_i
     *q_out = acc_im;
 }
 
-// Stage 3: narrow real bandpass, post-demodulation. This is a plain
-// two-pole (biquad) resonator, not an FIR - deliberately so: it needs to
-// be cheaply re-tunable at runtime (rx_audio_set_filter_bw()), and by
-// this point in the chain the signal is already real, single-sided
+// Stage 3: narrow real bandpass, post-demodulation. Built from cascaded
+// two-pole (biquad) resonator sections, not an FIR - deliberately so: it
+// needs to be cheaply re-tunable at runtime (rx_audio_set_filter_bw()),
+// and by this point in the chain the signal is already real, single-sided
 // audio (stage 1 already resolved the image-reject question), so there
 // is no symmetry concern left to design around - just an ordinary
 // adjustable-Q audio peaking filter, the same building block a classic
 // CW rig's analog audio filter is. RBJ Audio EQ Cookbook's
-// "constant 0dB peak gain" bandpass formula:
+// "constant 0dB peak gain" bandpass formula for one section:
 //   w0 = 2*pi*f0/Fs, alpha = sin(w0)/(2*Q), Q = f0/bandwidth_hz
 //   b0 =  alpha/a0, b1 = 0, b2 = -alpha/a0
 //   a1 = -2*cos(w0)/a0, a2 = (1-alpha)/a0,  a0 = 1+alpha
+//
+// A single section's skirt is gentle - measured only ~17dB down a full
+// 1600Hz off center (5.3 "bandwidths" away, see
+// docs/dsp_design_notes/rx_audio_demod_design.md §8.4) - because a 2-pole
+// resonator just doesn't roll off steeply close-in. Cascading identical
+// sections in series is the standard fix (real CW audio filters commonly
+// use 2-4 sections this way): dB is additive per stage, so 4 sections
+// turn that -17dB into roughly -68dB at the same offset.
 struct biquad_state {
     double b0, b1, b2, a1, a2;   // coefficients (b1 always 0 for this design)
     double x1, x2, y1, y2;       // history
@@ -305,6 +313,8 @@ static double biquad_apply(struct biquad_state *f, double x) {
     return y;
 }
 
+#define NARROW_FILTER_SECTIONS 4   // cascaded identical biquad sections
+
 #define RX_AUDIO_FILTER_DEFAULT_BW_HZ 300   // untested starting point, same
                                              // caveat as v1/v2's constants -
                                              // expect to retune by ear
@@ -312,7 +322,40 @@ static double biquad_apply(struct biquad_state *f, double x) {
 #define RX_AUDIO_FILTER_MAX_HZ 2000    // don't let it swallow stage 1's whole
                                         // 3000Hz-wide passband
 
-static struct biquad_state narrow_filter;
+struct narrow_filter_state {
+    struct biquad_state stage[NARROW_FILTER_SECTIONS];
+};
+
+static struct narrow_filter_state narrow_filter;
+
+// Cascading N identical resonant sections narrows the COMBINED -3dB
+// bandwidth well below any one section's own -3dB width (that's the
+// whole point - it's what makes the skirt steeper), so each section has
+// to be deliberately built WIDER than the bandwidth callers actually
+// want, or rx_audio_set_filter_bw(overall_bw_hz) would silently mean
+// something narrower than its name says. Classic result for N cascaded
+// synchronously-tuned single-resonance stages: a section built for
+// `overall_bw_hz / sqrt(2^(1/N) - 1)` gives the whole cascade a -3dB
+// width of exactly overall_bw_hz. Verified numerically against this
+// exact digital biquad (not just the idealized analog formula) to
+// within ~0.2% across a wide range of target bandwidths before being
+// trusted here - see
+// docs/dsp_design_notes/rx_audio_demod_design.md §8.4.
+static void narrow_filter_set_bandwidth(struct narrow_filter_state *f,
+                                         double overall_bw_hz) {
+    double correction = sqrt(pow(2.0, 1.0 / NARROW_FILTER_SECTIONS) - 1.0);
+    double section_bw_hz = overall_bw_hz / correction;
+    for (int i = 0; i < NARROW_FILTER_SECTIONS; i++)
+        biquad_set_bandpass(&f->stage[i], (double)CW_PITCH_HZ,
+                             section_bw_hz, (double)SAMPLE_RATE_HZ);
+}
+
+static double narrow_filter_apply(struct narrow_filter_state *f, double x) {
+    double y = x;
+    for (int i = 0; i < NARROW_FILTER_SECTIONS; i++)
+        y = biquad_apply(&f->stage[i], y);
+    return y;
+}
 
 // v1 shipped with a fixed peak-PCM-amplitude multiplier here (the same
 // role as sound.c's SIDETONE_PEAK_AMPLITUDE), calibrated only against a
@@ -381,11 +424,12 @@ void rx_audio_init(void) {
     }
     ssb_state.pos = 0;
 
-    narrow_filter.x1 = narrow_filter.x2 = 0.0;
-    narrow_filter.y1 = narrow_filter.y2 = 0.0;
-    biquad_set_bandpass(&narrow_filter, (double)CW_PITCH_HZ,
-                         (double)RX_AUDIO_FILTER_DEFAULT_BW_HZ,
-                         (double)SAMPLE_RATE_HZ);
+    for (int i = 0; i < NARROW_FILTER_SECTIONS; i++) {
+        narrow_filter.stage[i].x1 = narrow_filter.stage[i].x2 = 0.0;
+        narrow_filter.stage[i].y1 = narrow_filter.stage[i].y2 = 0.0;
+    }
+    narrow_filter_set_bandwidth(&narrow_filter,
+                                 (double)RX_AUDIO_FILTER_DEFAULT_BW_HZ);
 
     agc_attack_alpha  = onepole_alpha_from_ms(AGC_ATTACK_MS);
     agc_release_alpha = onepole_alpha_from_ms(AGC_RELEASE_MS);
@@ -402,10 +446,9 @@ void rx_audio_set_filter_bw(int bandwidth_hz) {
     if (bandwidth_hz < RX_AUDIO_FILTER_MIN_HZ) bandwidth_hz = RX_AUDIO_FILTER_MIN_HZ;
     if (bandwidth_hz > RX_AUDIO_FILTER_MAX_HZ) bandwidth_hz = RX_AUDIO_FILTER_MAX_HZ;
     // Coefficients only - deliberately leaves narrow_filter's history
-    // (x1/x2/y1/y2) alone, so changing width live doesn't glitch harder
-    // than the small transient any filter change causes.
-    biquad_set_bandpass(&narrow_filter, (double)CW_PITCH_HZ,
-                         (double)bandwidth_hz, (double)SAMPLE_RATE_HZ);
+    // (each section's x1/x2/y1/y2) alone, so changing width live doesn't
+    // glitch harder than the small transient any filter change causes.
+    narrow_filter_set_bandwidth(&narrow_filter, (double)bandwidth_hz);
 }
 
 double rx_audio_debug_agc_envelope(void) {
@@ -430,7 +473,7 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
 
         // Stage 3: narrow real bandpass - the actual single-signal
         // selectivity, decoupled from stage 1's image rejection.
-        double narrowed = biquad_apply(&narrow_filter, audio);
+        double narrowed = narrow_filter_apply(&narrow_filter, audio);
 
         // Stage 4: AGC - track a smoothed envelope of |narrowed| (fast
         // attack so a strong signal keying up doesn't clip before the
