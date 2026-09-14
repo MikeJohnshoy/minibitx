@@ -12,65 +12,47 @@
 // would have to duplicate (and then fight minibitx for the same
 // physical audio device).
 //
-// The technique is a product detector, same idea a classic analog CW
-// rig's BFO implements in hardware, split into three independent
-// stages:
+// v3 architecture - four independent stages, each with one job:
 //
-//   1. Run the incoming I/Q through a complex (Hilbert-style) bandpass
-//      filter that keeps only ONE side of dial center and rejects the
-//      other - see "Why complex, not just narrow" below for why this
-//      replaced v1's plain single-pole lowpass.
-//   2. Mix the filtered I/Q up to CW_PITCH_HZ (cw.h - the same pitch the
-//      TX sidetone already uses, so RX and TX match) and keep only the
-//      real part. A steady carrier sitting exactly at dial center comes
-//      out as a steady CW_PITCH_HZ tone - not silence, for the same
-//      reason cw.c's TX side never keys straight at 0 Hz either (see
-//      cw.h's CW_PITCH_HZ comment).
-//   3. Run the result through an AGC (envelope-following automatic gain
-//      control) that normalizes toward a fixed target output level -
-//      see AGC_TARGET_AMPLITUDE below for why a fixed multiplier alone
-//      doesn't work: real signal amplitude at this point in the chain
-//      (bench-measured, see that comment) varies far more than any one
-//      constant could cover without either being silent on a weak
-//      signal or clipping on a strong one.
+//   1. A WIDE complex (Hilbert-style) bandpass filter that keeps one
+//      side of dial center and rejects the other. This is the only
+//      stage that needs to be complex/asymmetric, and it's deliberately
+//      wide (SSB_FILTER_FPASS_HZ/FSTOP_HZ below) rather than narrow -
+//      see "Why wide, not narrow" below.
+//   2. Mix the filtered I/Q up to CW_PITCH_HZ (cw.h) and keep only the
+//      real part - same product-detector math as always,
+//      Re[(I+jQ)*(cos+jsin)] = I*cos - Q*sin.
+//   3. A NARROW real bandpass (a simple two-pole resonant filter, not an
+//      FIR) centered on CW_PITCH_HZ, doing the actual "single signal"
+//      selectivity - runtime-adjustable via rx_audio_set_filter_bw(),
+//      restored here after v2 removed it (v2's narrow width and image
+//      rejection were the same knob; v3 separates them, see below).
+//   4. An AGC (envelope-following automatic gain control) that
+//      normalizes toward a fixed target output level - see
+//      AGC_TARGET_AMPLITUDE below for why a fixed multiplier alone
+//      can't work.
 //
-// Why complex, not just narrow (the zero-beat symmetry fix):
-// v1's stage 1 was a single-pole lowpass applied identically to I and Q
-// - a real-valued filter, which is mathematically Hermitian-symmetric
-// (|H(-f)| == |H(f)|) no matter how it's tuned. It could narrow the
-// passband, but it could never tell a station 300Hz above dial center
-// from one 300Hz below - both came through equally strong, unlike a
-// real receiver's crystal/mechanical filter, whose skirt sits physically
-// off-center relative to the BFO (see
-// docs/dsp_design_notes/antialias_filter_design.md §3 for the same
-// off-center-skirt idea used on the TX side). Fixing that needs a filter
-// whose frequency response is NOT symmetric - a complex FIR, built here
-// by taking a real symmetric lowpass prototype (scipy.signal.remez, same
-// technique as antialias.c) and modulating it by a complex exponential
-// referenced to its own center tap. That shifts its passband from
-// [-300, +300] to one-sided [0, +600] Hz - passing
-// content on one side of dial center, rejecting the other, with rejection
-// improving the further a station sits from dial center (full derivation
-// and bench numbers: docs/dsp_design_notes/rx_audio_demod_design.md §7).
-//
-// Referencing the modulating phase to the filter's own center tap (not
-// absolute sample index 0) is what makes both halves of the resulting
-// complex filter retain the same kind of tap-reduction symmetry
-// antialias.c's real filter has: the real part comes out EVEN-symmetric
-// (h[i'] == h[N-1-i'] here for coefficient tables), the imaginary
-// (Hilbert) part comes out ODD-symmetric (h[i'] == -h[N-1-i']) with an
-// exact zero at the center tap. This implementation does NOT hand-fold
-// that symmetry into half-length loops, though - antialias.c didn't
-// either (see its own header comment on the double-length history
-// buffer): a manually-mirrored access pattern is harder for gcc to
-// autovectorize than the straight sequential loop below, and at this
-// tap count the straight version is still nowhere near a real
-// constraint (well under 1% of one Pi 4 core - see the design doc for
-// the actual multiply-add budget). The double-length history buffer
-// below IS the same trick antialias.c uses, for the same reason: it
-// keeps the inner loop's read a single contiguous slice with no
-// wraparound branch, which is what actually let gcc's -O3 autovectorize
-// it.
+// Why wide, not narrow (the v2 -> v3 change):
+// v2 used ONE complex filter to do both jobs at once - its passband
+// edge was both "how much of the audio range survives" and "how sharp
+// the image rejection transition is". That's the wrong thing to
+// conflate: on-air testing (2026-09) showed signals getting soft well
+// before the edge of the nominal passband, because the filter's own
+// equiripple roll-off was eating into what should have been a clean,
+// flat "wanted" region. The fix, and the more conventional approach for
+// a phasing-method receiver: let the complex filter do ONLY image
+// rejection, across a passband wide enough to comfortably not matter
+// (SSB_FILTER_FPASS_HZ, 1500 Hz - wide enough for a future SSB monitor
+// too, not just today's CW use), and do the actual narrow "single
+// signal" selectivity in a completely separate, much cheaper stage
+// AFTER demodulation (stage 3), where the signal is already real and
+// single-sided so an ordinary symmetric filter is perfectly fine - no
+// more mirror-image ambiguity to worry about by that point. Widening
+// stage 1's passband costs nothing extra: FIR tap count is set by the
+// TRANSITION width, not by where the passband edge sits (Harris'
+// estimate, `N ~= (Fs/transition_Hz)*(Astop_dB/22)`, has no Fpass term
+// at all) - see docs/dsp_design_notes/rx_audio_demod_design.md SS7 for
+// the numbers that confirmed this before any code changed.
 
 #include "rx_audio.h"
 #include "cw.h"
@@ -79,175 +61,164 @@
 
 #define SAMPLE_RATE_HZ 96000
 
-#define SSB_FIR_TAPS 359
+#define SSB_FIR_TAPS 327
 
-// Complex bandpass filter: real symmetric lowpass prototype designed via
-// scipy.signal.remez(SSB_FIR_TAPS, [0, 300, 700, 48000],
-// [1, 0], weight=[1, 10], fs=96000) - passband edge 300Hz, stopband
-// edge 700Hz, achieving ~1.7dB passband ripple and -40dB worst-case
-// stopband - then modulated by exp(j*2*pi*300*m/Fs), m referenced to
-// the filter's own center tap, to shift its response from symmetric
-// [-300,+300] to one-sided [0, +600] Hz. Coefficients
+// Stage 1: wide image-reject complex bandpass. Real symmetric lowpass
+// prototype designed via scipy.signal.remez(SSB_FIR_TAPS,
+// [0, 1500, 1900, 48000], [1, 0], weight=[1, 10], fs=96000) - passband
+// edge 1500Hz, stopband edge 1900Hz, ~1.7dB passband ripple, -40dB
+// worst-case stopband - then modulated by exp(j*2*pi*1500*m/Fs), m
+// referenced to the filter's own center tap, to shift its response from
+// symmetric [-1500,+1500] to one-sided [0, +3000] Hz. Coefficients
 // pre-reversed at generation time (ssb_hr[i] == hr[N-1-i], same for
-// ssb_hi) so the loop in ssb_filter_apply() below - structurally
-// identical to antialias_apply() - reproduces the textbook
-// y[n] = sum_k h[k]*x[n-k] convolution; see
-// docs/dsp_design_notes/rx_audio_demod_design.md §7 for the full
-// derivation and the numeric image-rejection verification this table
-// was checked against before being pasted in here.
+// ssb_hi) so the loop in ssb_filter_apply() below reproduces the
+// textbook y[n] = sum_k h[k]*x[n-k] convolution - see
+// docs/dsp_design_notes/rx_audio_demod_design.md SS7 for the full
+// derivation, the reversal subtlety, and the numeric verification this
+// table was checked against before being pasted in here.
 //
-// Passes baseband content from 0 up to +600Hz above dial center
-// (the "wanted" side); rejects content below dial center, with rejection
-// improving from a few dB right at zero beat (a fundamental limit - no
-// filter can separate +0Hz from -0Hz) up past 40dB by 500Hz.
+// Passes baseband content from 0 up to +3000Hz above dial center (the
+// "wanted" side, comfortably wide - see file header); rejects content
+// below dial center, with rejection improving from a few dB right at
+// zero beat (a fundamental limit shared by any filter - nothing can
+// separate +0Hz from -0Hz) out to -40dB by roughly 1500-2000Hz. Stage 3
+// below is what actually shapes single-signal selectivity now.
 static const double ssb_hr[SSB_FIR_TAPS] = {
-     0.00472338,  0.00040056,  0.00041983,  0.00043927,  0.00045878,
-     0.00047837,  0.00049792,  0.00051741,  0.00053677,  0.00055593,
-     0.00057479,  0.00059329,  0.00061138,  0.00062897,  0.00064587,
-     0.00066228,  0.00067796,  0.00069296,  0.00070744,  0.00072117,
-     0.00073433,  0.00074692,  0.00075888,  0.00077007,  0.00078032,
-     0.00078931,  0.00079665,  0.00080199,  0.00080535,  0.00080746,
-     0.00081084,  0.00082093,  0.00081266,  0.00081371,  0.00081118,
-     0.00080723,  0.00080187,  0.00079505,  0.00078675,  0.00077699,
-     0.00076577,  0.00075310,  0.00073903,  0.00072362,  0.00070686,
-     0.00068868,  0.00066933,  0.00064855,  0.00062649,  0.00060323,
-     0.00057858,  0.00055276,  0.00052587,  0.00049800,  0.00046930,
-     0.00043991,  0.00040986,  0.00037906,  0.00034734,  0.00031474,
-     0.00028161,  0.00024890,  0.00021700,  0.00018204,  0.00014932,
-     0.00011595,  0.00008289,  0.00005022,  0.00001802, -0.00001357,
-    -0.00004442, -0.00007441, -0.00010342, -0.00013129, -0.00015788,
-    -0.00018306, -0.00020670, -0.00022854, -0.00024859, -0.00026656,
-    -0.00028235, -0.00029592, -0.00030705, -0.00031562, -0.00032152,
-    -0.00032457, -0.00032461, -0.00032149, -0.00031514, -0.00030546,
-    -0.00029236, -0.00027566, -0.00025515, -0.00023079, -0.00020272,
-    -0.00017047, -0.00013420, -0.00009374, -0.00004903,  0.00000000,
-     0.00005341,  0.00011126,  0.00017359,  0.00024044,  0.00031184,
-     0.00038780,  0.00046835,  0.00055350,  0.00064321,  0.00073755,
-     0.00083639,  0.00093974,  0.00104759,  0.00115984,  0.00127645,
-     0.00139740,  0.00152257,  0.00165186,  0.00178512,  0.00192229,
-     0.00206331,  0.00220811,  0.00235647,  0.00250805,  0.00266284,
-     0.00282115,  0.00298187,  0.00314565,  0.00331190,  0.00348051,
-     0.00365132,  0.00382411,  0.00399865,  0.00417476,  0.00435220,
-     0.00453071,  0.00471005,  0.00489001,  0.00507040,  0.00525081,
-     0.00543135,  0.00561131,  0.00579069,  0.00596930,  0.00614667,
-     0.00632264,  0.00649708,  0.00666969,  0.00684011,  0.00700801,
-     0.00717321,  0.00733559,  0.00749495,  0.00765091,  0.00780296,
-     0.00795121,  0.00809578,  0.00823541,  0.00837096,  0.00850157,
-     0.00862723,  0.00874772,  0.00886283,  0.00897239,  0.00907626,
-     0.00917427,  0.00926623,  0.00935195,  0.00943135,  0.00950433,
-     0.00957055,  0.00963049,  0.00968320,  0.00972924,  0.00976845,
-     0.00980040,  0.00982526,  0.00984315,  0.00985399,  0.00985763,
-     0.00985399,  0.00984315,  0.00982526,  0.00980040,  0.00976845,
-     0.00972924,  0.00968320,  0.00963049,  0.00957055,  0.00950433,
-     0.00943135,  0.00935195,  0.00926623,  0.00917427,  0.00907626,
-     0.00897239,  0.00886283,  0.00874772,  0.00862723,  0.00850157,
-     0.00837096,  0.00823541,  0.00809578,  0.00795121,  0.00780296,
-     0.00765091,  0.00749495,  0.00733559,  0.00717321,  0.00700801,
-     0.00684011,  0.00666969,  0.00649708,  0.00632264,  0.00614667,
-     0.00596930,  0.00579069,  0.00561131,  0.00543135,  0.00525081,
-     0.00507040,  0.00489001,  0.00471005,  0.00453071,  0.00435220,
-     0.00417476,  0.00399865,  0.00382411,  0.00365132,  0.00348051,
-     0.00331190,  0.00314565,  0.00298187,  0.00282115,  0.00266284,
-     0.00250805,  0.00235647,  0.00220811,  0.00206331,  0.00192229,
-     0.00178512,  0.00165186,  0.00152257,  0.00139740,  0.00127645,
-     0.00115984,  0.00104759,  0.00093974,  0.00083639,  0.00073755,
-     0.00064321,  0.00055350,  0.00046835,  0.00038780,  0.00031184,
-     0.00024044,  0.00017359,  0.00011126,  0.00005341,  0.00000000,
-    -0.00004903, -0.00009374, -0.00013420, -0.00017047, -0.00020272,
-    -0.00023079, -0.00025515, -0.00027566, -0.00029236, -0.00030546,
-    -0.00031514, -0.00032149, -0.00032461, -0.00032457, -0.00032152,
-    -0.00031562, -0.00030705, -0.00029592, -0.00028235, -0.00026656,
-    -0.00024859, -0.00022854, -0.00020670, -0.00018306, -0.00015788,
-    -0.00013129, -0.00010342, -0.00007441, -0.00004442, -0.00001357,
-     0.00001802,  0.00005022,  0.00008289,  0.00011595,  0.00014932,
-     0.00018204,  0.00021700,  0.00024890,  0.00028161,  0.00031474,
-     0.00034734,  0.00037906,  0.00040986,  0.00043991,  0.00046930,
-     0.00049800,  0.00052587,  0.00055276,  0.00057858,  0.00060323,
-     0.00062649,  0.00064855,  0.00066933,  0.00068868,  0.00070686,
-     0.00072362,  0.00073903,  0.00075310,  0.00076577,  0.00077699,
-     0.00078675,  0.00079505,  0.00080187,  0.00080723,  0.00081118,
-     0.00081371,  0.00081266,  0.00082093,  0.00081084,  0.00080746,
-     0.00080535,  0.00080199,  0.00079665,  0.00078931,  0.00078032,
-     0.00077007,  0.00075888,  0.00074692,  0.00073433,  0.00072117,
-     0.00070744,  0.00069296,  0.00067796,  0.00066228,  0.00064587,
-     0.00062897,  0.00061138,  0.00059329,  0.00057479,  0.00055593,
-     0.00053677,  0.00051741,  0.00049792,  0.00047837,  0.00045878,
-     0.00043927,  0.00041983,  0.00040056,  0.00472338,
+     0.00472215, -0.00002114, -0.00003969, -0.00006961, -0.00011114,
+    -0.00016150, -0.00021969, -0.00028154, -0.00034457, -0.00040409,
+    -0.00045675, -0.00049749, -0.00052287, -0.00052815, -0.00051054,
+    -0.00046645, -0.00039427, -0.00029231, -0.00016067,  0.00000000,
+     0.00018761,  0.00039892,  0.00062998,  0.00087507,  0.00112885,
+     0.00138360,  0.00163348,  0.00186954,  0.00208671,  0.00227510,
+     0.00243290,  0.00254717,  0.00263303,  0.00266151,  0.00264065,
+     0.00257886,  0.00246894,  0.00231978,  0.00213206,  0.00191535,
+     0.00167489,  0.00142112,  0.00116156,  0.00090716,  0.00066616,
+     0.00044873,  0.00026227,  0.00011472,  0.00001135, -0.00004331,
+    -0.00004725,  0.00000000,  0.00009665,  0.00023889,  0.00042126,
+     0.00063610,  0.00087500,  0.00112753,  0.00138360,  0.00163154,
+     0.00186146,  0.00206177,  0.00222514,  0.00234085,  0.00240789,
+     0.00241989,  0.00237175,  0.00226963,  0.00211372,  0.00191145,
+     0.00166944,  0.00139798,  0.00110810,  0.00081252,  0.00052378,
+     0.00025532,  0.00001930, -0.00017243, -0.00031014, -0.00038575,
+    -0.00039387, -0.00033165, -0.00019931,  0.00000000,  0.00026013,
+     0.00057211,  0.00092454,  0.00130381,  0.00169486,  0.00208146,
+     0.00244720,  0.00277575,  0.00305229,  0.00326292,  0.00339712,
+     0.00344584,  0.00340487,  0.00327470,  0.00305457,  0.00275329,
+     0.00238031,  0.00194957,  0.00147779,  0.00098353,  0.00048771,
+     0.00001204, -0.00042216, -0.00079408, -0.00108504, -0.00127877,
+    -0.00136258, -0.00132784, -0.00117059, -0.00089187, -0.00049789,
+     0.00000000,  0.00058554,  0.00123806,  0.00193307,  0.00264318,
+     0.00333898,  0.00399025,  0.00456706,  0.00504100,  0.00538654,
+     0.00558190,  0.00561042,  0.00546133,  0.00512984,  0.00462087,
+     0.00394329,  0.00311532,  0.00216248,  0.00111596,  0.00001411,
+    -0.00110139, -0.00218483, -0.00318792, -0.00406261, -0.00476159,
+    -0.00524066, -0.00545995, -0.00538558, -0.00499112, -0.00425865,
+    -0.00317975, -0.00175614,  0.00000000,  0.00206603,  0.00440922,
+     0.00698740,  0.00975003,  0.01263942,  0.01559237,  0.01854190,
+     0.02141906,  0.02415516,  0.02668356,  0.02894165,  0.03087317,
+     0.03242858,  0.03356919,  0.03426578,  0.03449970,  0.03426578,
+     0.03356919,  0.03242858,  0.03087317,  0.02894165,  0.02668356,
+     0.02415516,  0.02141906,  0.01854190,  0.01559237,  0.01263942,
+     0.00975003,  0.00698740,  0.00440922,  0.00206603,  0.00000000,
+    -0.00175614, -0.00317975, -0.00425865, -0.00499112, -0.00538558,
+    -0.00545995, -0.00524066, -0.00476159, -0.00406261, -0.00318792,
+    -0.00218483, -0.00110139,  0.00001411,  0.00111596,  0.00216248,
+     0.00311532,  0.00394329,  0.00462087,  0.00512984,  0.00546133,
+     0.00561042,  0.00558190,  0.00538654,  0.00504100,  0.00456706,
+     0.00399025,  0.00333898,  0.00264318,  0.00193307,  0.00123806,
+     0.00058554,  0.00000000, -0.00049789, -0.00089187, -0.00117059,
+    -0.00132784, -0.00136258, -0.00127877, -0.00108504, -0.00079408,
+    -0.00042216,  0.00001204,  0.00048771,  0.00098353,  0.00147779,
+     0.00194957,  0.00238031,  0.00275329,  0.00305457,  0.00327470,
+     0.00340487,  0.00344584,  0.00339712,  0.00326292,  0.00305229,
+     0.00277575,  0.00244720,  0.00208146,  0.00169486,  0.00130381,
+     0.00092454,  0.00057211,  0.00026013,  0.00000000, -0.00019931,
+    -0.00033165, -0.00039387, -0.00038575, -0.00031014, -0.00017243,
+     0.00001930,  0.00025532,  0.00052378,  0.00081252,  0.00110810,
+     0.00139798,  0.00166944,  0.00191145,  0.00211372,  0.00226963,
+     0.00237175,  0.00241989,  0.00240789,  0.00234085,  0.00222514,
+     0.00206177,  0.00186146,  0.00163154,  0.00138360,  0.00112753,
+     0.00087500,  0.00063610,  0.00042126,  0.00023889,  0.00009665,
+     0.00000000, -0.00004725, -0.00004331,  0.00001135,  0.00011472,
+     0.00026227,  0.00044873,  0.00066616,  0.00090716,  0.00116156,
+     0.00142112,  0.00167489,  0.00191535,  0.00213206,  0.00231978,
+     0.00246894,  0.00257886,  0.00264065,  0.00266151,  0.00263303,
+     0.00254717,  0.00243290,  0.00227510,  0.00208671,  0.00186954,
+     0.00163348,  0.00138360,  0.00112885,  0.00087507,  0.00062998,
+     0.00039892,  0.00018761,  0.00000000, -0.00016067, -0.00029231,
+    -0.00039427, -0.00046645, -0.00051054, -0.00052815, -0.00052287,
+    -0.00049749, -0.00045675, -0.00040409, -0.00034457, -0.00028154,
+    -0.00021969, -0.00016150, -0.00011114, -0.00006961, -0.00003969,
+    -0.00002114,  0.00472215,
 };
 
 static const double ssb_hi[SSB_FIR_TAPS] = {
-     0.00184870,  0.00014777,  0.00014558,  0.00014273,  0.00013917,
-     0.00013491,  0.00012993,  0.00012422,  0.00011777,  0.00011058,
-     0.00010265,  0.00009397,  0.00008456,  0.00007444,  0.00006361,
-     0.00005212,  0.00003998,  0.00002723,  0.00001389, -0.00000000,
-    -0.00001442, -0.00002935, -0.00004475, -0.00006061, -0.00007685,
-    -0.00009342, -0.00011019, -0.00012702, -0.00014382, -0.00016061,
-    -0.00017790, -0.00019709, -0.00021206, -0.00022949, -0.00024607,
-    -0.00026228, -0.00027807, -0.00029331, -0.00030793, -0.00032184,
-    -0.00033496, -0.00034719, -0.00035846, -0.00036870, -0.00037782,
-    -0.00038568, -0.00039230, -0.00039743, -0.00040104, -0.00040307,
-    -0.00040325, -0.00040160, -0.00039807, -0.00039259, -0.00038514,
-    -0.00037572, -0.00036421, -0.00035040, -0.00033397, -0.00031474,
-    -0.00029290, -0.00026926, -0.00024419, -0.00021314, -0.00018195,
-    -0.00014708, -0.00010950, -0.00006912, -0.00002586,  0.00002031,
-     0.00006938,  0.00012142,  0.00017645,  0.00023444,  0.00029538,
-     0.00035927,  0.00042616,  0.00049575,  0.00056832,  0.00064354,
-     0.00072140,  0.00080211,  0.00088545,  0.00097139,  0.00105992,
-     0.00115085,  0.00124397,  0.00133912,  0.00143631,  0.00153566,
-     0.00163716,  0.00174044,  0.00184466,  0.00194989,  0.00205825,
-     0.00216603,  0.00227564,  0.00238591,  0.00249684,  0.00260827,
-     0.00272001,  0.00283184,  0.00294361,  0.00305511,  0.00316615,
-     0.00327650,  0.00338605,  0.00349467,  0.00360188,  0.00370791,
-     0.00381206,  0.00391429,  0.00401458,  0.00411248,  0.00420790,
-     0.00430074,  0.00439074,  0.00447756,  0.00456095,  0.00464081,
-     0.00471712,  0.00478975,  0.00485835,  0.00492232,  0.00498182,
-     0.00503753,  0.00508756,  0.00513324,  0.00517369,  0.00520896,
-     0.00523892,  0.00526343,  0.00528237,  0.00529565,  0.00530317,
-     0.00530478,  0.00530039,  0.00528998,  0.00527353,  0.00525081,
-     0.00522214,  0.00518704,  0.00514574,  0.00509827,  0.00504444,
-     0.00498437,  0.00491816,  0.00484581,  0.00476729,  0.00468261,
-     0.00459187,  0.00449525,  0.00439286,  0.00428471,  0.00417077,
-     0.00405134,  0.00392673,  0.00379658,  0.00366153,  0.00352147,
-     0.00337663,  0.00322721,  0.00307336,  0.00291531,  0.00275325,
-     0.00258741,  0.00241799,  0.00224520,  0.00206930,  0.00189053,
-     0.00170908,  0.00152532,  0.00133935,  0.00115153,  0.00096211,
-     0.00077131,  0.00057943,  0.00038674,  0.00019351,  0.00000000,
-    -0.00019351, -0.00038674, -0.00057943, -0.00077131, -0.00096211,
-    -0.00115153, -0.00133935, -0.00152532, -0.00170908, -0.00189053,
-    -0.00206930, -0.00224520, -0.00241799, -0.00258741, -0.00275325,
-    -0.00291531, -0.00307336, -0.00322721, -0.00337663, -0.00352147,
-    -0.00366153, -0.00379658, -0.00392673, -0.00405134, -0.00417077,
-    -0.00428471, -0.00439286, -0.00449525, -0.00459187, -0.00468261,
-    -0.00476729, -0.00484581, -0.00491816, -0.00498437, -0.00504444,
-    -0.00509827, -0.00514574, -0.00518704, -0.00522214, -0.00525081,
-    -0.00527353, -0.00528998, -0.00530039, -0.00530478, -0.00530317,
-    -0.00529565, -0.00528237, -0.00526343, -0.00523892, -0.00520896,
-    -0.00517369, -0.00513324, -0.00508756, -0.00503753, -0.00498182,
-    -0.00492232, -0.00485835, -0.00478975, -0.00471712, -0.00464081,
-    -0.00456095, -0.00447756, -0.00439074, -0.00430074, -0.00420790,
-    -0.00411248, -0.00401458, -0.00391429, -0.00381206, -0.00370791,
-    -0.00360188, -0.00349467, -0.00338605, -0.00327650, -0.00316615,
-    -0.00305511, -0.00294361, -0.00283184, -0.00272001, -0.00260827,
-    -0.00249684, -0.00238591, -0.00227564, -0.00216603, -0.00205825,
-    -0.00194989, -0.00184466, -0.00174044, -0.00163716, -0.00153566,
-    -0.00143631, -0.00133912, -0.00124397, -0.00115085, -0.00105992,
-    -0.00097139, -0.00088545, -0.00080211, -0.00072140, -0.00064354,
-    -0.00056832, -0.00049575, -0.00042616, -0.00035927, -0.00029538,
-    -0.00023444, -0.00017645, -0.00012142, -0.00006938, -0.00002031,
-     0.00002586,  0.00006912,  0.00010950,  0.00014708,  0.00018195,
-     0.00021314,  0.00024419,  0.00026926,  0.00029290,  0.00031474,
-     0.00033397,  0.00035040,  0.00036421,  0.00037572,  0.00038514,
-     0.00039259,  0.00039807,  0.00040160,  0.00040325,  0.00040307,
-     0.00040104,  0.00039743,  0.00039230,  0.00038568,  0.00037782,
-     0.00036870,  0.00035846,  0.00034719,  0.00033496,  0.00032184,
-     0.00030793,  0.00029331,  0.00027807,  0.00026228,  0.00024607,
-     0.00022949,  0.00021206,  0.00019709,  0.00017790,  0.00016061,
-     0.00014382,  0.00012702,  0.00011019,  0.00009342,  0.00007685,
-     0.00006061,  0.00004475,  0.00002935,  0.00001442,  0.00000000,
-    -0.00001389, -0.00002723, -0.00003998, -0.00005212, -0.00006361,
-    -0.00007444, -0.00008456, -0.00009397, -0.00010265, -0.00011058,
-    -0.00011777, -0.00012422, -0.00012993, -0.00013491, -0.00013917,
-    -0.00014273, -0.00014558, -0.00014777, -0.00184870,
+     0.00143245, -0.00000420, -0.00000391,  0.00000000,  0.00001095,
+     0.00003213,  0.00006664,  0.00011662,  0.00018418,  0.00027000,
+     0.00037485,  0.00049749,  0.00063712,  0.00079043,  0.00095516,
+     0.00112611,  0.00129974,  0.00146956,  0.00163127,  0.00177775,
+     0.00190482,  0.00200551,  0.00207676,  0.00211260,  0.00211193,
+     0.00207071,  0.00199041,  0.00186954,  0.00171252,  0.00152017,
+     0.00130041,  0.00105507,  0.00079872,  0.00052941,  0.00026008,
+    -0.00000000, -0.00024317, -0.00046143, -0.00064675, -0.00079336,
+    -0.00089525, -0.00094956, -0.00095327, -0.00090716, -0.00081172,
+    -0.00067157, -0.00049067, -0.00027697, -0.00003741,  0.00021776,
+     0.00047975,  0.00073727,  0.00098129,  0.00120098,  0.00138870,
+     0.00153568,  0.00163702,  0.00168747,  0.00168592,  0.00163154,
+     0.00152766,  0.00137763,  0.00118936,  0.00096961,  0.00073043,
+     0.00048135,  0.00023360, -0.00000000, -0.00020818, -0.00038021,
+    -0.00050642, -0.00057906, -0.00059229, -0.00054291, -0.00042986,
+    -0.00025532, -0.00002352,  0.00025806,  0.00058023,  0.00093129,
+     0.00129843,  0.00166733,  0.00202367,  0.00235273,  0.00264113,
+     0.00287619,  0.00304780,  0.00314768,  0.00317087,  0.00311513,
+     0.00298192,  0.00277575,  0.00250495,  0.00218021,  0.00181580,
+     0.00142731,  0.00103286,  0.00065138,  0.00030085, -0.00000000,
+    -0.00023444, -0.00038779, -0.00044828, -0.00040739, -0.00026069,
+    -0.00000805,  0.00034646,  0.00079408,  0.00132212,  0.00191382,
+     0.00254920,  0.00320569,  0.00385893,  0.00448372,  0.00505515,
+     0.00554939,  0.00594513,  0.00622413,  0.00637248,  0.00638119,
+     0.00624679,  0.00597184,  0.00556498,  0.00504100,  0.00442062,
+     0.00372971,  0.00299883,  0.00226216,  0.00155612,  0.00091915,
+     0.00038838, -0.00000000, -0.00021299, -0.00022198, -0.00000428,
+     0.00045621,  0.00116782,  0.00213010,  0.00333410,  0.00476159,
+     0.00638576,  0.00817139,  0.01007572,  0.01204963,  0.01403890,
+     0.01598567,  0.01783041,  0.01951336,  0.02097680,  0.02216667,
+     0.02303438,  0.02353865,  0.02364668,  0.02333563,  0.02259337,
+     0.02141906,  0.01982362,  0.01782939,  0.01546963,  0.01278809,
+     0.00983710,  0.00667733,  0.00337488,  0.00000000, -0.00337488,
+    -0.00667733, -0.00983710, -0.01278809, -0.01546963, -0.01782939,
+    -0.01982362, -0.02141906, -0.02259337, -0.02333563, -0.02364668,
+    -0.02353865, -0.02303438, -0.02216667, -0.02097680, -0.01951336,
+    -0.01783041, -0.01598567, -0.01403890, -0.01204963, -0.01007572,
+    -0.00817139, -0.00638576, -0.00476159, -0.00333410, -0.00213010,
+    -0.00116782, -0.00045621,  0.00000428,  0.00022198,  0.00021299,
+     0.00000000, -0.00038838, -0.00091915, -0.00155612, -0.00226216,
+    -0.00299883, -0.00372971, -0.00442062, -0.00504100, -0.00556498,
+    -0.00597184, -0.00624679, -0.00638119, -0.00637248, -0.00622413,
+    -0.00594513, -0.00554939, -0.00505515, -0.00448372, -0.00385893,
+    -0.00320569, -0.00254920, -0.00191382, -0.00132212, -0.00079408,
+    -0.00034646,  0.00000805,  0.00026069,  0.00040739,  0.00044828,
+     0.00038779,  0.00023444,  0.00000000, -0.00030085, -0.00065138,
+    -0.00103286, -0.00142731, -0.00181580, -0.00218021, -0.00250495,
+    -0.00277575, -0.00298192, -0.00311513, -0.00317087, -0.00314768,
+    -0.00304780, -0.00287619, -0.00264113, -0.00235273, -0.00202367,
+    -0.00166733, -0.00129843, -0.00093129, -0.00058023, -0.00025806,
+     0.00002352,  0.00025532,  0.00042986,  0.00054291,  0.00059229,
+     0.00057906,  0.00050642,  0.00038021,  0.00020818,  0.00000000,
+    -0.00023360, -0.00048135, -0.00073043, -0.00096961, -0.00118936,
+    -0.00137763, -0.00152766, -0.00163154, -0.00168592, -0.00168747,
+    -0.00163702, -0.00153568, -0.00138870, -0.00120098, -0.00098129,
+    -0.00073727, -0.00047975, -0.00021776,  0.00003741,  0.00027697,
+     0.00049067,  0.00067157,  0.00081172,  0.00090716,  0.00095327,
+     0.00094956,  0.00089525,  0.00079336,  0.00064675,  0.00046143,
+     0.00024317,  0.00000000, -0.00026008, -0.00052941, -0.00079872,
+    -0.00105507, -0.00130041, -0.00152017, -0.00171252, -0.00186954,
+    -0.00199041, -0.00207071, -0.00211193, -0.00211260, -0.00207676,
+    -0.00200551, -0.00190482, -0.00177775, -0.00163127, -0.00146956,
+    -0.00129974, -0.00112611, -0.00095516, -0.00079043, -0.00063712,
+    -0.00049749, -0.00037485, -0.00027000, -0.00018418, -0.00011662,
+    -0.00006664, -0.00003213, -0.00001095, -0.00000000,  0.00000391,
+     0.00000420, -0.00143245,
 };
 
 struct ssb_filter_state {
@@ -264,6 +235,16 @@ static struct ssb_filter_state ssb_state;
 // across both output rails:
 //   i_out = sum(hr*hist_i) - sum(hi*hist_q)
 //   q_out = sum(hr*hist_q) + sum(hi*hist_i)
+//
+// Double-length history buffer, same trick antialias.c uses: every
+// sample is written at two mirrored positions so a TAPS-long read never
+// needs to wrap, keeping the loop branch-free for gcc's -O3 to
+// autovectorize. Not hand-folded into half-length loops despite hr/hi's
+// even/odd symmetry (see the file header derivation) - same tradeoff
+// antialias.c already made: a mirrored-index access pattern is harder
+// to autovectorize than this straight sequential loop, and at this tap
+// count (~1300 multiply-adds/sample, ~125M/sec at 96kHz) the unfolded
+// version is nowhere near a real constraint on a Pi 4.
 static void ssb_filter_apply(struct ssb_filter_state *f, double i_in, double q_in,
                               double *i_out, double *q_out) {
     f->hist_i[f->pos] = i_in;
@@ -285,6 +266,53 @@ static void ssb_filter_apply(struct ssb_filter_state *f, double i_in, double q_i
     *i_out = acc_re;
     *q_out = acc_im;
 }
+
+// Stage 3: narrow real bandpass, post-demodulation. This is a plain
+// two-pole (biquad) resonator, not an FIR - deliberately so: it needs to
+// be cheaply re-tunable at runtime (rx_audio_set_filter_bw()), and by
+// this point in the chain the signal is already real, single-sided
+// audio (stage 1 already resolved the image-reject question), so there
+// is no symmetry concern left to design around - just an ordinary
+// adjustable-Q audio peaking filter, the same building block a classic
+// CW rig's analog audio filter is. RBJ Audio EQ Cookbook's
+// "constant 0dB peak gain" bandpass formula:
+//   w0 = 2*pi*f0/Fs, alpha = sin(w0)/(2*Q), Q = f0/bandwidth_hz
+//   b0 =  alpha/a0, b1 = 0, b2 = -alpha/a0
+//   a1 = -2*cos(w0)/a0, a2 = (1-alpha)/a0,  a0 = 1+alpha
+struct biquad_state {
+    double b0, b1, b2, a1, a2;   // coefficients (b1 always 0 for this design)
+    double x1, x2, y1, y2;       // history
+};
+
+static void biquad_set_bandpass(struct biquad_state *f, double f0_hz,
+                                 double bandwidth_hz, double fs_hz) {
+    double q = f0_hz / bandwidth_hz;
+    double w0 = 2.0 * M_PI * f0_hz / fs_hz;
+    double alpha = sin(w0) / (2.0 * q);
+    double a0 = 1.0 + alpha;
+    f->b0 =  alpha / a0;
+    f->b1 =  0.0;
+    f->b2 = -alpha / a0;
+    f->a1 = (-2.0 * cos(w0)) / a0;
+    f->a2 = (1.0 - alpha) / a0;
+}
+
+static double biquad_apply(struct biquad_state *f, double x) {
+    double y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
+             - f->a1 * f->y1 - f->a2 * f->y2;
+    f->x2 = f->x1; f->x1 = x;
+    f->y2 = f->y1; f->y1 = y;
+    return y;
+}
+
+#define RX_AUDIO_FILTER_DEFAULT_BW_HZ 300   // untested starting point, same
+                                             // caveat as v1/v2's constants -
+                                             // expect to retune by ear
+#define RX_AUDIO_FILTER_MIN_HZ   20    // don't let Q run away toward infinity
+#define RX_AUDIO_FILTER_MAX_HZ 2000    // don't let it swallow stage 1's whole
+                                        // 3000Hz-wide passband
+
+static struct biquad_state narrow_filter;
 
 // v1 shipped with a fixed peak-PCM-amplitude multiplier here (the same
 // role as sound.c's SIDETONE_PEAK_AMPLITUDE), calibrated only against a
@@ -324,9 +352,11 @@ static struct vfo bfo;                 // CW_PITCH_HZ mixing oscillator
 static double rx_volume = 0.5;         // 0.0-1.0 - see rx_audio_set_volume()
 
 // AGC envelope follower state - agc_env tracks a smoothed |audio|
-// estimate; the gain applied each sample is AGC_TARGET_AMPLITUDE /
-// agc_env, so as agc_env rises/falls the output rides back toward the
-// target instead of tracking the raw input amplitude directly.
+// estimate (of the STAGE 3 output, so it reflects the narrow filter's
+// real selectivity - see rx_audio_debug_agc_envelope() in rx_audio.h);
+// the gain applied each sample is AGC_TARGET_AMPLITUDE / agc_env, so as
+// agc_env rises/falls the output rides back toward the target instead
+// of tracking the raw input amplitude directly.
 static double agc_env = 0.0;
 static double agc_attack_alpha, agc_release_alpha;
 
@@ -351,6 +381,12 @@ void rx_audio_init(void) {
     }
     ssb_state.pos = 0;
 
+    narrow_filter.x1 = narrow_filter.x2 = 0.0;
+    narrow_filter.y1 = narrow_filter.y2 = 0.0;
+    biquad_set_bandpass(&narrow_filter, (double)CW_PITCH_HZ,
+                         (double)RX_AUDIO_FILTER_DEFAULT_BW_HZ,
+                         (double)SAMPLE_RATE_HZ);
+
     agc_attack_alpha  = onepole_alpha_from_ms(AGC_ATTACK_MS);
     agc_release_alpha = onepole_alpha_from_ms(AGC_RELEASE_MS);
     agc_env = 0.0;
@@ -362,6 +398,16 @@ void rx_audio_set_volume(int percent) {
     rx_volume = (double)percent / 100.0;
 }
 
+void rx_audio_set_filter_bw(int bandwidth_hz) {
+    if (bandwidth_hz < RX_AUDIO_FILTER_MIN_HZ) bandwidth_hz = RX_AUDIO_FILTER_MIN_HZ;
+    if (bandwidth_hz > RX_AUDIO_FILTER_MAX_HZ) bandwidth_hz = RX_AUDIO_FILTER_MAX_HZ;
+    // Coefficients only - deliberately leaves narrow_filter's history
+    // (x1/x2/y1/y2) alone, so changing width live doesn't glitch harder
+    // than the small transient any filter change causes.
+    biquad_set_bandpass(&narrow_filter, (double)CW_PITCH_HZ,
+                         (double)bandwidth_hz, (double)SAMPLE_RATE_HZ);
+}
+
 double rx_audio_debug_agc_envelope(void) {
     return agc_env;
 }
@@ -369,9 +415,8 @@ double rx_audio_debug_agc_envelope(void) {
 void rx_audio_process(const double *i_samples, const double *q_samples,
                        int n, int32_t *out) {
     for (int k = 0; k < n; k++) {
-        // Stage 1: complex bandpass - narrows the passband AND breaks
-        // the symmetric-around-dial-center problem v1 had. See the file
-        // header for the full picture.
+        // Stage 1: wide complex bandpass - image rejection only, see the
+        // file header for why this replaced v2's single combined filter.
         double fi, fq;
         ssb_filter_apply(&ssb_state, i_samples[k], q_samples[k], &fi, &fq);
 
@@ -383,21 +428,25 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
         double s = (double)bfo_sin / 1073741824.0;
         double audio = fi * c - fq * s;
 
-        // Stage 3: AGC - track a smoothed envelope of |audio| (fast
+        // Stage 3: narrow real bandpass - the actual single-signal
+        // selectivity, decoupled from stage 1's image rejection.
+        double narrowed = biquad_apply(&narrow_filter, audio);
+
+        // Stage 4: AGC - track a smoothed envelope of |narrowed| (fast
         // attack so a strong signal keying up doesn't clip before the
         // envelope catches up, slow release so gain doesn't pump on
         // every CW dit/dah gap), then scale so the envelope itself sits
         // at AGC_TARGET_AMPLITUDE regardless of how large or small the
         // raw input actually is - see the constants above for why a
         // fixed multiplier alone can't work here.
-        double mag = fabs(audio);
+        double mag = fabs(narrowed);
         double alpha = (mag > agc_env) ? agc_attack_alpha : agc_release_alpha;
         agc_env += alpha * (mag - agc_env);
 
         double gain = AGC_TARGET_AMPLITUDE / (agc_env > 1e-9 ? agc_env : 1e-9);
         if (gain > AGC_MAX_GAIN) gain = AGC_MAX_GAIN;
 
-        double sample = audio * gain * rx_volume;
+        double sample = narrowed * gain * rx_volume;
         if (sample >  2000000000.0) sample =  2000000000.0;
         if (sample < -2000000000.0) sample = -2000000000.0;
         out[k] = (int32_t)sample;
