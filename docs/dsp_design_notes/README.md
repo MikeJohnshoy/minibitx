@@ -38,13 +38,16 @@ already used in `antialias_filter_design.md`.
   a fixed output gain couldn't work once real signal levels were
   measured on the bench (and the AGC that replaced it), the WM8731
   `Master` L/R independence fix that came out of the same debugging
-  session, and the two-stage (v3) filtering that replaced v1/v2's
-  single combined filter - a wide complex image-reject bandpass
-  decoupled from a separate, narrow, runtime-adjustable post-demod
-  selectivity filter, once on-air listening showed conflating the two
-  made signals sound soft well before the passband edge. Status:
-  implemented; first on-air CW copy confirmed (2026-09) against v1's
-  filter, v2's image-reject filter also on-air confirmed (signals fade
-  below ~500Hz sidetone pitch, matching the bench prediction), v3's
-  stage split bench-verified numerically but not yet re-confirmed on
-  air.
+  session, the two-stage (v3) filtering that replaced v1/v2's single
+  combined filter - a wide complex image-reject bandpass decoupled from
+  a separate, narrow, runtime-adjustable post-demod selectivity filter -
+  and, following an on-air report of a 3kHz-away CW signal still being
+  clearly audible, why that selectivity filter needed to become a
+  4-section cascaded biquad (plus the bandwidth-correction math that
+  keeps `rx_audio_set_filter_bw()` meaning what it says, and a
+  settling-time fix to the test harness needed to measure it correctly).
+  Status: implemented; first on-air CW copy confirmed (2026-09) against
+  v1's filter, v2's image-reject filter also on-air confirmed (signals
+  fade below ~500Hz sidetone pitch, matching the bench prediction), v3's
+  stage split and the 4-section cascade are both bench-verified
+  numerically but not yet re-confirmed on air.
