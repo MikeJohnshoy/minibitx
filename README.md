@@ -7,7 +7,7 @@ minibitx can now be compiled and run on the Rpi-4 in the sbitx to demonstrate an
 Mature, highly developed external Software Defined Radio (SDR) applications are being used with minibitx to find the upper limit of the sbitx processing chain.
 Lessons learned in this project can be folded back into sbitx or used in other projects.
 
-minibitx receive processing pipeline is largely dictated by the sbitx hardware.
+The minibitx receive processing pipeline is largely dictated by the sbitx hardware.
 Some significant changes in the digital signal processing software design are being experimented with.
 
 ```
