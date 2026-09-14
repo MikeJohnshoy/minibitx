@@ -1,30 +1,5 @@
 # RX Audio Demodulation: Local CW Monitor Design
 
-Status: implemented (`rx_audio.c`/`rx_audio.h`, wired into `sound.c` — see
-§6 and [`../02_rx_processing_pipeline.md`](../02_rx_processing_pipeline.md)).
-First on-air confirmation (2026-09): copyable CW audio while tuning
-through FT8-band signals on 40m, after the AGC fix in §5. v1's
-symmetric-around-zero-beat limitation was fixed in v2 by a complex
-(Hilbert-style) bandpass filter (§7); on-air listening then found v2's
-filter conflated image rejection with narrow selectivity in a way that
-made signals sound soft well before the edge of the nominal passband.
-v3 split those into two independent stages — a wide image-reject
-filter (§7) and a separate narrow post-demodulation selectivity filter
-(§8) — the more conventional phasing-receiver architecture. On-air
-listening against v3 then surfaced a real report — two CW signals 3kHz
-apart, the un-tuned one still audible quite strongly — traced to a
-resonator's skirt staying gentle no matter how many identical sections
-get cascaded (§8.1). After a resonator cascade (~83dB on that scenario)
-still didn't reach real-crystal-filter territory, stage 3 was replaced
-outright with a fixed 8-pole elliptic (Cauer) design (§8.2) — same pole
-count, ~1.9:1 shape factor (in the range of a real CW crystal filter),
-~99dB on the same scenario once fully settled (§8.5). This is now a
-committed, fixed design, not runtime-adjustable — `rx_audio_set_filter_bw()`
-existed for one revision and is gone again (§8.2). Bench-verified
-numerically, including a re-checked settling-time window (§8.5) and a
-striking (expected, not a bug — §8.4) folding artifact right at the edge
-of stage 1's passband; not yet re-confirmed on air.
-
 ## 1. Background
 
 minibitx's baseband I/Q (see
