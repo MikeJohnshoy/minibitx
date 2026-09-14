@@ -3,11 +3,15 @@
 Status: implemented (`rx_audio.c`/`rx_audio.h`, wired into `sound.c` — see
 §6 and [`../02_rx_processing_pipeline.md`](../02_rx_processing_pipeline.md)).
 First on-air confirmation (2026-09): copyable CW audio while tuning
-through FT8-band signals on 40m, after the AGC fix in §5. The v1
-symmetric-around-zero-beat limitation (originally flagged in this
-section as unresolved) has since been fixed by a complex (Hilbert-style)
-bandpass filter — see §7 — bench-verified numerically, not yet
-re-confirmed on air.
+through FT8-band signals on 40m, after the AGC fix in §5. v1's
+symmetric-around-zero-beat limitation was fixed in v2 by a complex
+(Hilbert-style) bandpass filter (§7); on-air listening then found v2's
+filter conflated image rejection with narrow selectivity in a way that
+made signals sound soft well before the edge of the nominal passband.
+v3 (current) splits those into two independent stages — a wide image-reject
+filter (§7) and a separate narrow post-demodulation selectivity filter
+(§8) — the more conventional phasing-receiver architecture. Bench-verified
+numerically; not yet re-confirmed on air.
 
 ## 1. Background
 
@@ -45,18 +49,18 @@ immediate. Putting it here instead costs one function call.
 ## 3. The product detector
 
 The core technique is a standard product detector — the same idea a
-classic analog CW rig's BFO implements in hardware — split into two
-independent stages so "how narrow/selective" and "what pitch" stay
-separate knobs:
+classic analog CW rig's BFO implements in hardware — now split into
+**four** independent stages, each with exactly one job (v1/v2 combined
+some of these; see §7.6 for why v3 pulled them apart):
 
-1. **Filter the passband, at its original location.** `i_samples[]`/
-   `q_samples[]` arrive centered on dial center (0 Hz offset) — whatever
-   external control surface is tuning the radio (FLRig, for now; see
+1. **A wide complex bandpass filter, at the signal's original location.**
+   `i_samples[]`/`q_samples[]` arrive centered on dial center (0 Hz
+   offset) — whatever external control surface is tuning the radio
+   (FLRig, for now; see
    [`../04_remote_control_and_iq_output.md`](../04_remote_control_and_iq_output.md))
-   is expected to park the wanted signal there. v1 used a single-pole
-   lowpass applied independently to I and Q; v2 replaced that with a
-   complex (Hilbert-style) bandpass filter that keeps only one side of
-   dial center — see §7 for why, and the full design.
+   is expected to park the wanted signal there. This stage's only job is
+   telling one side of dial center from the other (image rejection) —
+   see §7 for the full design. It is deliberately wide, not narrow.
 2. **Mix up to `CW_PITCH_HZ` and keep the real part.** `cw.h`'s
    `CW_PITCH_HZ` (700 Hz) is the same pitch the TX sidetone already
    uses, so RX and TX match. `Re[(I+jQ)(cos+jsin)] = I·cos − Q·sin`,
@@ -64,13 +68,20 @@ separate knobs:
    NCO code needed. A steady carrier sitting exactly at dial center
    comes out as a steady 700 Hz tone, not silence, for the same reason
    `cw.c`'s TX side never keys straight at 0 Hz either.
+3. **A narrow real bandpass, after demodulation.** By this point the
+   signal is real, single-sided audio — the image question is already
+   settled, so an ordinary symmetric filter can narrow it down to
+   whatever bandwidth actually makes for comfortable single-signal
+   copy, independent of stage 1 entirely. See §8.
+4. **An AGC**, covered in §5.
 
 Verified against synthetic I/Q before ever touching real hardware
 (`test_rx_audio.c`, not part of the build): a carrier at dial center
 produces a clean 698.3 Hz tone (target ~700 Hz); a carrier at +5kHz
-offset comes out attenuated relative to that. §5 covers what changed in
-that test once the AGC was added; §7 covers the later image-rejection
-test added when the filter itself changed.
+offset comes out heavily attenuated by the time it reaches the output
+(now rejected by both stage 1 and stage 3 — see §8.2). §5 covers what
+changed in that test once the AGC was added; §7/§8 cover the later tests
+added as the filtering itself evolved.
 
 ## 4. Why an FFT wasn't used instead
 
@@ -117,7 +128,7 @@ diagnose, because the actual bug turned out to be three bugs deep:
    control (to `TX_MASTER_VOL`, feeding the TX exciter) and re-muted it
    on every RX return without ever restoring it — meaning RX audio (and
    the CW sidetone) were only ever briefly audible during a TX burst
-   itself. The real, final fix (not a v1 detail, see §8) was
+   itself. The real, final fix (not a v1 detail, see §9) was
    discovering `Master` has independent left/right volume registers and
    splitting local-monitor level (left) from TX exciter drive (right)
    entirely, so neither can step on the other again.
@@ -147,15 +158,15 @@ of a fixed gain:
 
 An asymmetric single-pole envelope follower tracks `|audio|` (fast
 attack, slow release), and the applied gain is
-`AGC_TARGET_AMPLITUDE / envelope`, clamped at `AGC_MAX_GAIN`. Verified
-with an extended `test_rx_audio.c` before delivery: a case at the
-bench-measured real amplitude (0.003) now produces output
+`AGC_TARGET_AMPLITUDE / envelope`, clamped at `AGC_MAX_GAIN`. As of v3,
+the AGC tracks the envelope of stage 3's output (the narrow-filtered
+audio), not the raw post-demod signal — so the envelope reflects the
+*combined* selectivity of both filtering stages, which is what
+`rx_audio_debug_agc_envelope()`'s callers actually want to measure (see
+§7.4/§8.2). Verified with an extended `test_rx_audio.c` before delivery:
+a case at the bench-measured real amplitude (0.003) now produces output
 indistinguishable from a full-scale (1.0) synthetic carrier — the exact
-regression the bug above represents — while a signal 5kHz outside the
-narrow filter still shows the expected ~-30dB down *in the AGC's
-internal envelope*, even though its eventual output loudness gets
-normalized like everything else (see §7 for why that specific interaction
-matters).
+regression the bug above represents.
 
 ## 6. Wiring into `sound.c`
 
@@ -182,8 +193,10 @@ rx_audio_process(i_samples, q_samples, n_samples, output_speaker);
 
 `rx_audio_init()` is called once at startup (`minibitx.c`), right after
 `cw_init()` — it needs the same VFO phase table already built for that.
+This wiring hasn't changed since v1; everything described in §7/§8 below
+is internal to `rx_audio_process()`.
 
-## 7. The single-sideband (image-reject) filter
+## 7. Stage 1: the wide image-reject filter
 
 ### 7.1 The problem it fixes
 
@@ -268,32 +281,48 @@ a sharper design cheaper, but wasn't needed: the modest design below
 already costs well under 1% of one Pi 4 core, so there was no pressure to
 add that complexity for a design point that already works.
 
-Design point actually built: `Fpass=300 Hz`, `Fstop=700 Hz`
-(`scipy.signal.remez(359, [0, 300, 700, 48000], [1, 0], weight=[1, 10],
-fs=96000)`), landing at **359 taps**, 1.67 dB passband ripple, -40.2 dB
-worst-case stopband on the real prototype. After the center-tap-relative
+Crucially, this formula has **no `Fpass` term at all** — tap count is
+set purely by the transition width, not by where the passband edge
+sits. That's the fact that drove the v2→v3 change in §7.6: widening the
+passband from 600Hz to 3000Hz cost nothing.
+
+Design point actually built (v3): `Fpass=1500 Hz`, `Fstop=1900 Hz`
+(`scipy.signal.remez(327, [0, 1500, 1900, 48000], [1, 0], weight=[1, 10],
+fs=96000)`), landing at **327 taps**, 1.72 dB passband ripple, -40.0 dB
+worst-case stopband on the real prototype — actually a few taps *fewer*
+than v2's narrower `Fpass=300/Fstop=700` design (359 taps), confirming
+the no-`Fpass`-dependence claim above. After the center-tap-relative
 modulation described in §7.2, this passes baseband content from 0 up to
-+600 Hz above dial center (the "wanted" side) and rejects the mirror
-side, with rejection depending on how far from dial center a station
-sits — there's no way around that: right at zero beat, `+0 Hz` and
-`-0 Hz` are the same frequency, so no filter of any length can separate
-them. The numeric image-rejection check (`scipy`, dual synthetic tones at
-`+f`/`-f`, then bench-reproduced in C — see §7.4) came out as:
++3000 Hz above dial center (the "wanted" side — deliberately wide, see
+§7.6) and rejects the mirror side, with rejection depending on how far
+from dial center a station sits — there's no way around that: right at
+zero beat, `+0 Hz` and `-0 Hz` are the same frequency, so no filter of
+any length can separate them. The numeric image-rejection check
+(`scipy`, dual synthetic tones at `+f`/`-f`, then bench-reproduced in C
+— see §7.4) came out as:
 
 ```
-f= 100 Hz: rejection ≈  4.1 dB   (near zero beat - fundamentally limited)
-f= 300 Hz: rejection ≈ 18.9 dB
-f= 500 Hz: rejection ≈ 41.6 dB
+f=  100 Hz: rejection ≈  5.1 dB   (near zero beat - fundamentally limited)
+f=  300 Hz: rejection ≈ 22.3 dB
+f=  500 Hz: rejection ≈ 45.4 dB
+f= 1000 Hz: rejection ≈ 42.9 dB
+f= 1500 Hz: rejection ≈ 26.1 dB   (see the folding note in §8.3 - this
+                                    isn't stage 1 getting worse, it's
+                                    stage 3's peak partially recovering a
+                                    tone that aliases back near it)
 ```
 
-Good enough for real CW copy, where most operators don't tune to exact
-zero beat anyway, without the four-figure tap counts a sharp near-DC
-transition would demand.
+(These numbers are measured with stage 3, §8, also in the loop — since
+that's what `test_rx_audio.c`'s case D now measures end-to-end. Stage 1
+alone, evaluated directly in Python against the complex filter only,
+shows the expected monotonic improvement out to deep rejection by
+1500-2000Hz with no such dip; §8.3 explains where the dip in the full
+chain comes from.)
 
 ### 7.4 Implementation and verification
 
-`rx_audio.c` embeds two pre-computed coefficient tables, `ssb_hr[359]`
-and `ssb_hi[359]` (the even/odd-symmetric real and imaginary halves from
+`rx_audio.c` embeds two pre-computed coefficient tables, `ssb_hr[327]`
+and `ssb_hi[327]` (the even/odd-symmetric real and imaginary halves from
 §7.2), and a small `struct ssb_filter_state` holding double-length
 history buffers for the I and Q rails — the same double-write trick
 `antialias.c` uses (`hist[pos]` and `hist[pos+TAPS]` always equal, so a
@@ -307,20 +336,18 @@ i_out = sum(hr*hist_i) - sum(hi*hist_q)
 q_out = sum(hr*hist_q) + sum(hi*hist_i)
 ```
 
-That's 4 real convolutions of length 359 (~1436 multiply-adds/sample,
-~138M/sec at 96kHz) — this implementation does **not** hand-fold the
+That's 4 real convolutions of length 327 (~1308 multiply-adds/sample,
+~126M/sec at 96kHz) — this implementation does **not** hand-fold the
 even/odd symmetry into half-length loops the way the theory in §7.2
 would allow (summing/subtracting mirrored samples before multiplying, as
 `antialias_filter_design.md` §"7. Coefficients" describes for the real
 antialias filter). `antialias.c` itself didn't take that manual-folding
 route either — a mirrored-index access pattern is harder for gcc to
 autovectorize than the plain sequential loop, and at this tap count the
-unfolded version is nowhere near a real constraint (~138M multiply-adds/
-sec is a small fraction of a Pi 4 core's real-time-audio budget). Same
-answer either way: ride the compiler's autovectorization on a
-wraparound-free double-buffered loop, not manual coefficient-halving —
-consistent with how `antialias.c` already chose to spend that same
-tradeoff.
+unfolded version is nowhere near a real constraint. Same answer either
+way: ride the compiler's autovectorization on a wraparound-free
+double-buffered loop, not manual coefficient-halving — consistent with
+how `antialias.c` already chose to spend that same tradeoff.
 
 One subtlety that mattered getting this right: the coefficient tables
 had to be stored **time-reversed** relative to how `scipy.signal.remez`
@@ -331,18 +358,131 @@ without accounting for that would have silently produced the *mirror
 image* of the intended filter — passing the wrong sideband instead of
 the wanted one. This was caught before writing any hardware-facing code
 by simulating the exact C loop structure in Python against the
-straightforward `y[n] = sum_k h[k]*x[n-k]` reference definition
-(max error 6.7e-16, floating-point noise) — and then re-confirmed after
-the C code was written by extending `test_rx_audio.c` with a case D
-(image rejection at `f=100/300/500 Hz`, comparing the AGC envelope for a
-`+f` tone against its `-f` mirror, the same "read the envelope, not the
-AGC-normalized output" technique §5 introduced). The numbers it
-measures from actual compiled C match the Python design prediction in
-§7.3 exactly (4.1 / 18.9 / 41.6 dB) — this is a fixed-coefficient design,
-so a match this exact confirms the reversal was handled correctly, not
-close-enough DSP behavior.
+straightforward `y[n] = sum_k h[k]*x[n-k]` reference definition (max
+error on the order of 1e-15, floating-point noise), and re-confirmed
+after each C rewrite (v2 and v3) by extending `test_rx_audio.c` with a
+case D (image rejection at several `f`, comparing the AGC envelope for a
+`+f` tone against its `-f` mirror). v2's numbers matched the Python
+design prediction to one decimal place; v3's still track the same
+qualitative curve, now shaped by stage 3 too (§7.3's table, §8.3).
 
-## 8. Master output split (L/R independence)
+### 7.5 Which side is "wanted"
+
+`+Fpass` in §7.2's modulation was an arbitrary choice — it keeps the
+side *above* dial center and rejects *below*. On-air (2026-09, against
+the v2 design): stations tuned below roughly a 500Hz sidetone pitch
+faded out; ones above 700Hz stayed strong out to 1300Hz. Whether that's
+the orientation an operator actually wants to zero-beat toward is still
+open — flipping it is a one-line sign change (`-Fpass` instead of
+`+Fpass`) followed by regenerating the coefficient tables, not a
+redesign. Still undecided as of v3 (see §10).
+
+### 7.6 Widening it: decoupling image rejection from selectivity
+
+v2 used this same complex filter with `Fpass=300Hz` — i.e. the filter's
+own passband edge was *also* serving as the final CW selectivity width.
+On-air listening (2026-09) found this made signals sound soft well
+before the edge of the nominal 600Hz-wide passband: the filter's own
+equiripple roll-off was eating directly into what should have been a
+clean, flat "wanted" region, because one filter was being asked to do
+two jobs that don't actually need to be coupled — reject the image
+(needs asymmetry, but can tolerate a wide passband) and shape the final
+bandwidth (needs no asymmetry at all, since by definition it happens
+*after* the image question is settled).
+
+The more conventional phasing-receiver architecture keeps these
+separate: a wideband image-reject network (spec'd across however much
+audio range you ever want, flat within that range) followed by
+whatever audio-domain selectivity filtering an operator actually wants,
+applied to the resulting single real channel. §7.3's Harris formula is
+what makes this free rather than a tradeoff: since tap count depends
+only on transition width, not passband width, widening `Fpass` from 300
+to 1500 Hz cost nothing (327 taps vs. 359 — actually slightly *fewer*).
+1500 Hz was chosen with headroom for a possible future onboard SSB
+monitor in mind, not just today's CW use, though building one is a
+separate, much bigger project (SSB needs its own audio-domain detection
+scheme, and digital-mode decode like FT8 is WSJT-X's job entirely, not
+something to replicate here) — widening this filter doesn't imply that
+work, it just means the one genuinely hard piece (image rejection)
+wouldn't need a redesign if that happens later.
+
+The actual "how narrow" knob moved to a new stage 3, §8.
+
+## 8. Stage 3: the narrow (post-demodulation) selectivity filter
+
+### 8.1 Why a biquad, not another FIR
+
+By the time stage 2 (§3) has mixed the image-rejected signal up to
+`CW_PITCH_HZ` and taken the real part, there's no more mirror-image
+ambiguity left to design around — this stage is an ordinary, symmetric
+audio bandpass, the same kind of thing a classic CW rig's analog audio
+peak filter has always been. Two reasons this is a two-pole IIR
+resonator (RBJ Audio EQ Cookbook's "constant 0dB peak gain" bandpass)
+rather than another `scipy.signal.remez` FIR like every other filter in
+this codebase:
+
+- **Cheap adjustability.** `rx_audio_set_filter_bw()` needs to change the
+  filter's width at runtime (a future tuning encoder or CAT/rigctl
+  extension - see §10). Recomputing a biquad's 5 coefficients from a new
+  `Q` is a few trig calls; recomputing an FIR's whole coefficient table
+  in real time is not something to do from an audio callback.
+- **It's simply cheap.** A single biquad is ~5 multiply-adds per sample
+  total, vs. hundreds for an equivalently narrow FIR (Harris' formula
+  again: a genuinely narrow transition costs real taps, same as §7.3 -
+  a resonator sidesteps that by not being a linear-phase design at all,
+  which doesn't matter here since nothing downstream cares about phase
+  linearity in a single audio tone).
+
+Formula (`f0 = CW_PITCH_HZ`, `Q = f0 / bandwidth_hz`):
+
+```
+w0 = 2*pi*f0/Fs,  alpha = sin(w0)/(2*Q)
+b0 =  alpha/a0,  b1 = 0,  b2 = -alpha/a0
+a1 = -2*cos(w0)/a0,  a2 = (1-alpha)/a0,  a0 = 1+alpha
+```
+
+Default bandwidth `RX_AUDIO_FILTER_DEFAULT_BW_HZ = 300` (untested
+starting point, same caveat as every other constant in this design —
+expect to retune by ear). Verified in Python before writing C: measured
+-3dB points at 562-867Hz (305Hz wide, target 300Hz), poles at magnitude
+0.990 (comfortably inside the unit circle — stable).
+
+### 8.2 Verification: are the two stages actually decoupled?
+
+The whole point of §7.6's change was to make "how wide is the image-reject
+filter" and "how narrow is the final selectivity" into two independent
+knobs. `test_rx_audio.c`'s case E checks this directly: a tone at dial
+center (always at stage 3's peak, wherever stage 1's edges are) should
+barely change if stage 3's width changes, while a tone well inside stage
+1's wide passband but well outside stage 3's default width should change
+a lot. Measured:
+
+```
+dial-center tone:          narrow(300Hz)=0.862  wide(2000Hz)=0.862  (unchanged)
++1000Hz-offset tone:       narrow(300Hz)=0.195   wide(2000Hz)=0.767  (+11.9dB)
+```
+
+Confirms it: stage 1's own attenuation of the +1000Hz tone doesn't
+change when stage 3's width changes (as it shouldn't - they're separate
+filters now), and stage 3 alone accounts for the full 11.9dB swing.
+
+### 8.3 A subtlety: real-audio folding at large rejected-side offsets
+
+§7.3's rejection table has an odd-looking dip at `f=1500Hz` (26.1dB,
+worse than `f=1000Hz`'s 42.9dB) that isn't a stage-1 regression. Stage 2
+mixes up by `+CW_PITCH_HZ` and takes the real part, and a real signal's
+spectrum is inherently mirror-symmetric around 0Hz - so a baseband
+offset of `f=-1500Hz` produces a mixed frequency of `700-1500=-800Hz`,
+which folds to an audible `+800Hz` tone. That folded 800Hz sits much
+closer to stage 3's 700Hz peak than the unfolded arithmetic suggests, so
+stage 3 partially *recovers* it even though stage 1 rejected the
+original tone deeply. This is an inherent consequence of using a real
+(not complex) BFO mix + real narrow filter for stage 2/3, not a bug to
+fix - and it only matters for offsets large enough to fold back near
+`CW_PITCH_HZ` (roughly beyond `2*CW_PITCH_HZ`), well outside where a
+real CW signal would be tuned in practice.
+
+## 9. Master output split (L/R independence)
 
 Related fix, landed alongside the AGC work: the WM8731's `Master`
 control turned out to have independent left/right volume registers, and
@@ -357,30 +497,24 @@ this, both shared one value, and every TX/RX transition would silently
 re-mute whichever purpose wasn't currently active — see §5, item 2, for
 the debugging trail this caused.
 
-## 9. What's not decided yet
+## 10. What's not decided yet
 
 - **BFO sign** (the sign passed to `vfo_start(&bfo, CW_PITCH_HZ, 0)`) is
   still an untested starting point, not a bench calibration — worth
   checking by ear now that audio is actually reaching a speaker.
-- **Which side is "wanted"** — §7's filter was built to keep the side
-  *above* dial center (`+Fpass` modulation) and reject below; that choice
-  was arbitrary (not yet matched against which side an operator would
-  actually prefer to zero-beat toward), and flipping it is a one-line
-  sign change (`-Fpass` instead of `+Fpass`) followed by regenerating the
-  coefficient tables — not yet bench/on-air confirmed either way.
+- **Which side is "wanted"** (§7.5) — still arbitrary, still a one-line
+  sign flip away from reversing.
 - **`AGC_TARGET_AMPLITUDE`/`AGC_ATTACK_MS`/`AGC_RELEASE_MS`** are
   reasonable-looking starting points, not yet tuned against extended
   listening — particularly whether 300ms release feels right between
   CW characters, or pumps/lags noticeably.
-- **§7's design point** (`Fpass=300`/`Fstop=700`, 359 taps, -40dB
-  stopband) is a reasonable balance of tap count vs. selectivity, not a
-  bench-tuned final answer — a sharper transition (more taps, better
-  rejection nearer zero beat) or decimating before filtering (per
-  `decim48k.c`'s precedent) both remain open if 359 taps turns out to be
-  too broad or too narrow once there's real on-air listening time behind
-  it.
-- **Runtime control** — `rx_audio_set_volume()` exists but nothing calls
-  it yet; the filter itself is now fixed-coefficient (like `antialias.c`,
-  no runtime cutoff knob at all — see `rx_audio.h`). Wiring volume to a
-  future physical encoder (the `mb-radio` panel app) or a CAT/rigctl
-  extension is unstarted.
+- **Stage 1's design point** (`Fpass=1500`/`Fstop=1900`, 327 taps, -40dB
+  stopband) and **stage 3's default width** (300Hz) are both reasonable
+  starting points, not bench-tuned final answers — real on-air listening
+  time may push either one narrower, wider, or toward a sharper/decimated
+  design (§7.3) if 327 taps' worth of rejection right near zero beat
+  isn't enough.
+- **Runtime control** — `rx_audio_set_volume()` and
+  `rx_audio_set_filter_bw()` both exist but nothing calls either one yet;
+  wiring them to a future physical encoder (the `mb-radio` panel app) or
+  a CAT/rigctl extension is unstarted.
