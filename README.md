@@ -51,15 +51,22 @@ Some significant changes in the digital signal processing software design are be
              needed (dsp_design_notes/rx_audio_demod_design.md)
 
 ```
-A transmit processing pipeline also exists (just imagine the reverse of the process abovve), currently for CW transmission only.
+A transmit processing pipeline also exists (just imagine the reverse of the process above), currently for CW transmission only.
 
 A secondary minibitx objective is to replace code dependent on deprecated libraries, so wiringPi has been replaced with libgpio.  The 'bit banging' code used for i2c bus was replaced with i2c support built into the kernel.  
 
-minibitx is quite small - most of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external SDR applications.
+minibitx is quite small - much of the code is in the interface software that passes data through various protocols (hpsdr protocol 1, USB audio and control gadget, and UDP interface) to external SDR applications.
 
-TO DO: 
+Changes: 
+- bit-banging code replaced with kernel functions
+- wiringPi replaced with libgpio
+- DSP processing no longer FFT-based
+  -- CW receive processing uses a FIR filter for unwanted image rejection
+  -- sharp 8-pole elliptic filter for 300 Hz cw filter
+  -- on TX, cw waveform is built at high end of baseband IF, and then mixed to crystal filter freq where the unwanted product is well outside the crystal filter
+- IF gain requires AGC to provide usable signal into A/D convertor
+- hpsdr_p1.c and usb_gadget.c (UAC2) have been refined through experience gained with some windows SDR apps, but they sre definitely not plug-and-play yet
 
-1. simple/efficient/low-overhead packet interface for IQ in and out
 
 ## Building
 
