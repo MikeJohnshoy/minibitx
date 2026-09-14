@@ -15,12 +15,14 @@ void rx_audio_init(void);
 // 0-100. Scales the demodulated audio before it reaches the codec.
 void rx_audio_set_volume(int percent);
 
-// v1 had a runtime-adjustable filter cutoff here (rx_audio_set_filter_bw()).
-// The narrow filter is now a fixed-coefficient complex FIR (like
-// antialias.c's filter) rather than a single tunable one-pole lowpass, so
-// there's no longer a single "cutoff" knob to expose - see rx_audio.c and
-// docs/dsp_design_notes/rx_audio_demod_design.md §7 for the current design
-// and what would need to change to make it runtime-adjustable again.
+// Sets the -3dB width (Hz) of the narrow, post-demodulation "single
+// signal" selectivity filter centered on CW_PITCH_HZ - a separate knob
+// from the wide image-reject filter upstream of it (see rx_audio.c's
+// file header and docs/dsp_design_notes/rx_audio_demod_design.md §7 for
+// why those two are deliberately independent). Clamped to a sane range
+// internally; nothing calls this yet, wiring it to a future tuning
+// encoder or CAT/rigctl extension is unstarted.
+void rx_audio_set_filter_bw(int bandwidth_hz);
 
 // Demodulates one block's worth of already-mixed baseband I/Q (the same
 // i_samples[]/q_samples[] sound.c's sound_process() already computes for
