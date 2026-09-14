@@ -12,13 +12,18 @@ v3 split those into two independent stages — a wide image-reject
 filter (§7) and a separate narrow post-demodulation selectivity filter
 (§8) — the more conventional phasing-receiver architecture. On-air
 listening against v3 then surfaced a real report — two CW signals 3kHz
-apart, the un-tuned one still audible quite strongly — traced to stage
-3's single biquad section having a much gentler skirt than its -3dB
-width suggests (§8.4); the fix (current) is cascading four identical
-biquad sections (§8.5), which took that scenario's rejection from ~59dB
-to ~83dB. Bench-verified numerically, including a settling-time
-correction to the test harness itself (§8.6); not yet re-confirmed on
-air.
+apart, the un-tuned one still audible quite strongly — traced to a
+resonator's skirt staying gentle no matter how many identical sections
+get cascaded (§8.1). After a resonator cascade (~83dB on that scenario)
+still didn't reach real-crystal-filter territory, stage 3 was replaced
+outright with a fixed 8-pole elliptic (Cauer) design (§8.2) — same pole
+count, ~1.9:1 shape factor (in the range of a real CW crystal filter),
+~99dB on the same scenario once fully settled (§8.5). This is now a
+committed, fixed design, not runtime-adjustable — `rx_audio_set_filter_bw()`
+existed for one revision and is gone again (§8.2). Bench-verified
+numerically, including a re-checked settling-time window (§8.5) and a
+striking (expected, not a bug — §8.4) folding artifact right at the edge
+of stage 1's passband; not yet re-confirmed on air.
 
 ## 1. Background
 
@@ -77,16 +82,17 @@ some of these; see §7.6 for why v3 pulled them apart):
    `cw.c`'s TX side never keys straight at 0 Hz either.
 3. **A narrow real bandpass, after demodulation.** By this point the
    signal is real, single-sided audio — the image question is already
-   settled, so an ordinary symmetric filter can narrow it down to
-   whatever bandwidth actually makes for comfortable single-signal
-   copy, independent of stage 1 entirely. See §8.
+   settled, so an ordinary symmetric filter narrows it down to comfortable
+   single-signal copy, independent of stage 1 entirely. A fixed 8-pole
+   elliptic design, chosen to approach a real CW crystal filter's shape
+   factor. See §8.
 4. **An AGC**, covered in §5.
 
 Verified against synthetic I/Q before ever touching real hardware
 (`test_rx_audio.c`, not part of the build): a carrier at dial center
 produces a clean 698.3 Hz tone (target ~700 Hz); a carrier at +5kHz
 offset comes out heavily attenuated by the time it reaches the output
-(now rejected by both stage 1 and stage 3 — see §8.2). §5 covers what
+(now rejected by both stage 1 and stage 3 — see §8.6). §5 covers what
 changed in that test once the AGC was added; §7/§8 cover the later tests
 added as the filtering itself evolved.
 
@@ -170,7 +176,7 @@ the AGC tracks the envelope of stage 3's output (the narrow-filtered
 audio), not the raw post-demod signal — so the envelope reflects the
 *combined* selectivity of both filtering stages, which is what
 `rx_audio_debug_agc_envelope()`'s callers actually want to measure (see
-§7.4/§8.2). Verified with an extended `test_rx_audio.c` before delivery:
+§7.4/§8.6). Verified with an extended `test_rx_audio.c` before delivery:
 a case at the bench-measured real amplitude (0.003) now produces output
 indistinguishable from a full-scale (1.0) synthetic carrier — the exact
 regression the bug above represents.
@@ -309,28 +315,24 @@ any length can separate them. The numeric image-rejection check
 — see §7.4) came out as:
 
 ```
-f=  100 Hz: rejection ≈  5.1 dB   (near zero beat - fundamentally limited)
-f=  300 Hz: rejection ≈ 26.8 dB
-f=  500 Hz: rejection ≈ 66.6 dB
-f= 1000 Hz: rejection ≈ 41.7 dB
-f= 1500 Hz: rejection ≈  3.8 dB   (see the folding note in §8.3 - this
-                                    isn't stage 1 getting worse, it's
-                                    both the "+f" and "-f" tones already
-                                    being 30-40dB down from a dial-center
-                                    reference by this offset once stage
-                                    3's cascade, §8.5, is this sharp - the
-                                    ratio between two already-quiet
-                                    signals stops being a meaningful
-                                    number)
+f=  100 Hz: rejection ≈   4.5 dB   (near zero beat - fundamentally limited)
+f=  300 Hz: rejection ≈  35.5 dB
+f=  500 Hz: rejection ≈  46.2 dB
+f= 1000 Hz: rejection ≈  34.1 dB
+f= 1500 Hz: rejection ≈ −17.0 dB   (see the folding note in §8.4 - the
+                                     "wrong" side measures LOUDER than
+                                     the "wanted" side here, and that's
+                                     still not stage 1 regressing)
 ```
 
 (These numbers are measured with stage 3, §8, also in the loop — since
 that's what `test_rx_audio.c`'s case D now measures end-to-end, with the
-4-section cascade of §8.5 and a fully-settled 2-second measurement
-window, §8.6. Stage 1 alone, evaluated directly in Python against the
-complex filter only, shows the expected monotonic improvement out to
-deep rejection by 1500-2000Hz with no such dip; §8.3 explains where the
-dip in the full chain comes from.)
+current fixed elliptic design of §8.2 and a fully-settled 3-second
+measurement window, §8.5. Stage 1 alone, evaluated directly in Python
+against the complex filter only, shows the expected monotonic
+improvement out to deep rejection by 1500-2000Hz with no such dip; §8.4
+explains where the dip - now an outright sign flip - in the full chain
+comes from.)
 
 ### 7.4 Implementation and verification
 
@@ -377,7 +379,7 @@ after each C rewrite (v2 and v3) by extending `test_rx_audio.c` with a
 case D (image rejection at several `f`, comparing the AGC envelope for a
 `+f` tone against its `-f` mirror). v2's numbers matched the Python
 design prediction to one decimal place; v3's still track the same
-qualitative curve, now shaped by stage 3 too (§7.3's table, §8.3).
+qualitative curve, now shaped by stage 3 too (§7.3's table, §8.4).
 
 ### 7.5 Which side is "wanted"
 
@@ -423,98 +425,17 @@ The actual "how narrow" knob moved to a new stage 3, §8.
 
 ## 8. Stage 3: the narrow (post-demodulation) selectivity filter
 
-### 8.1 Why a biquad, not another FIR
+### 8.1 Two false starts: a resonator, then a resonator cascade
 
 By the time stage 2 (§3) has mixed the image-rejected signal up to
 `CW_PITCH_HZ` and taken the real part, there's no more mirror-image
 ambiguity left to design around — this stage is an ordinary, symmetric
 audio bandpass, the same kind of thing a classic CW rig's analog audio
-peak filter has always been. Two reasons this is built from two-pole IIR
-resonator sections (RBJ Audio EQ Cookbook's "constant 0dB peak gain"
-bandpass, now cascaded four deep — §8.4/§8.5) rather than another
-`scipy.signal.remez` FIR like every other filter in this codebase:
-
-- **Cheap adjustability.** `rx_audio_set_filter_bw()` needs to change the
-  filter's width at runtime (a future tuning encoder or CAT/rigctl
-  extension - see §10). Recomputing a biquad's 5 coefficients from a new
-  `Q` is a few trig calls; recomputing an FIR's whole coefficient table
-  in real time is not something to do from an audio callback.
-- **It's simply cheap.** A single biquad is ~5 multiply-adds per sample
-  total, vs. hundreds for an equivalently narrow FIR (Harris' formula
-  again: a genuinely narrow transition costs real taps, same as §7.3 -
-  a resonator sidesteps that by not being a linear-phase design at all,
-  which doesn't matter here since nothing downstream cares about phase
-  linearity in a single audio tone).
-
-Formula (`f0 = CW_PITCH_HZ`, `Q = f0 / bandwidth_hz`):
-
-```
-w0 = 2*pi*f0/Fs,  alpha = sin(w0)/(2*Q)
-b0 =  alpha/a0,  b1 = 0,  b2 = -alpha/a0
-a1 = -2*cos(w0)/a0,  a2 = (1-alpha)/a0,  a0 = 1+alpha
-```
-
-Default bandwidth `RX_AUDIO_FILTER_DEFAULT_BW_HZ = 300` (untested
-starting point, same caveat as every other constant in this design —
-expect to retune by ear) is the width of the whole cascade, not any one
-section — §8.5 covers how a single section's own width is derived from
-it. For a single section built directly for 300Hz (i.e. before the
-cascade correction existed), Python confirmed measured -3dB points at
-562-867Hz (305Hz wide, target 300Hz), poles at magnitude 0.990
-(comfortably inside the unit circle — stable); §8.4 covers why that
-single section, on its own, turned out not to be enough.
-
-### 8.2 Verification: are the two stages actually decoupled?
-
-The whole point of §7.6's change was to make "how wide is the image-reject
-filter" and "how narrow is the final selectivity" into two independent
-knobs. `test_rx_audio.c`'s case E checks this directly: a tone at dial
-center (always at stage 3's peak, wherever stage 1's edges are) should
-barely change if stage 3's width changes, while a tone well inside stage
-1's wide passband but well outside stage 3's default width should change
-a lot. Measured:
-
-```
-dial-center tone:          narrow(300Hz)=0.862  wide(2000Hz)=0.862  (unchanged)
-+1000Hz-offset tone:       narrow(300Hz)=0.035   wide(2000Hz)=0.784  (+27.0dB)
-```
-
-Confirms it: stage 1's own attenuation of the +1000Hz tone doesn't
-change when stage 3's width changes (as it shouldn't - they're separate
-filters now), and stage 3 alone accounts for the full swing (11.9dB with
-the original single biquad section; 27.0dB now that stage 3 is the
-4-section cascade of §8.5 — cascading sharpens the skirt in both
-directions, so widening it back out buys back more too).
-
-### 8.3 A subtlety: real-audio folding at large rejected-side offsets
-
-§7.3's rejection table has an odd-looking dip at `f=1500Hz` (3.8dB,
-worse than `f=1000Hz`'s 41.7dB) that isn't a stage-1 regression. Stage 2
-mixes up by `+CW_PITCH_HZ` and takes the real part, and a real signal's
-spectrum is inherently mirror-symmetric around 0Hz - so a baseband
-offset of `f=-1500Hz` produces a mixed frequency of `700-1500=-800Hz`,
-which folds to an audible `+800Hz` tone. That folded 800Hz sits much
-closer to stage 3's 700Hz peak than the unfolded arithmetic suggests, so
-stage 3 partially *recovers* it even though stage 1 rejected the
-original tone deeply. This is an inherent consequence of using a real
-(not complex) BFO mix + real narrow filter for stage 2/3, not a bug to
-fix - and it only matters for offsets large enough to fold back near
-`CW_PITCH_HZ` (roughly beyond `2*CW_PITCH_HZ`), well outside where a
-real CW signal would be tuned in practice.
-
-Now that stage 3 is the sharper 4-section cascade (§8.5), this dip looks
-different but for a reason that isn't actually about folding getting
-worse: at `f=1500Hz` both the wanted `+1500Hz` tone and the folded
-`-1500Hz` artifact are now themselves 30-40dB down from a dial-center
-reference, because the cascade's much narrower passband also rolls off
-legitimate wanted-side content that far from `CW_PITCH_HZ` - it isn't
-just rejecting the image any more, it's attenuating both sides toward
-the noise floor. The *ratio* between two already-quiet signals stops
-being a meaningful selectivity number at that specific offset, which is
-why `test_rx_audio.c`'s case D docstring flags it as an expected
-artifact rather than a regression to chase.
-
-### 8.4 Why a single section wasn't enough
+peak filter has always been. v3's first cut built it from a two-pole IIR
+resonator (RBJ Audio EQ Cookbook's "constant 0dB peak gain" bandpass
+formula), runtime-adjustable via `rx_audio_set_filter_bw()` (a few trig
+calls per retune - cheap, unlike recomputing an FIR's whole coefficient
+table from an audio callback).
 
 On-air listening against v3 surfaced a real report: two CW signals 3kHz
 apart, tuned to the higher one, with the other one still clearly audible
@@ -525,106 +446,180 @@ the whole rejected side rather than improving with distance from the
 transition band (confirmed by scanning stage 1 alone from -500Hz to
 -5000Hz in Python: rejection sat in the -40 to -46dB range throughout,
 not meaningfully better at -5000Hz than at -500Hz). So being "3kHz away"
-buys little from stage 1 by itself — a station 3kHz off is rejected
-about as well as one 500Hz off. That's a real, inherent property of this
-filter design, but it isn't the whole story, and it prompted the direct
-question: why doesn't stage 3 clean up what stage 1 leaves behind?
+buys little from stage 1 by itself. That's real, but it isn't the whole
+story: why doesn't stage 3 clean up what stage 1 leaves behind?
 
-The answer is that a single two-pole resonator's skirt is genuinely
-gentle close-in, in a way its -3dB width doesn't advertise. Measured
-directly (Python, the single-section biquad's own isolated frequency
-response, `f0=700Hz`, `bandwidth=300Hz` so `Q≈2.33`):
+Because a single two-pole resonator's skirt is genuinely gentle
+close-in, in a way its -3dB width doesn't advertise. Measured directly
+(Python, `f0=700Hz`, `bandwidth=300Hz` so `Q≈2.33`): only -5.9dB down at
+1 bandwidth from center, -11.6dB at 2, -17.0dB at 5.3. A 2-pole resonator
+only rolls off at 2 poles' worth of slope no matter how far out you go.
 
-```
-1.0 bandwidths from center:  -5.9 dB
-2.0 bandwidths from center: -11.6 dB
-5.3 bandwidths from center: -17.0 dB
-```
+The standard fix for a resonator's gentle skirt is cascading several
+identical sections - dB is additive per stage, so 4 sections should turn
+that -17dB into roughly -68dB at the same offset. This became
+`NARROW_FILTER_SECTIONS = 4`, each section built *wider* than the
+overall target (`section_bw = overall_bw / sqrt(2^(1/N) - 1)`, a
+correction verified to ~0.2% against the exact digital transfer
+function, not just the idealized analog approximation) so the combined
+cascade still landed on the requested -3dB width. It worked, and it took
+the 3kHz-apart scenario from ~59dB to ~83dB (§8.6) - a real improvement,
+delivered first.
 
-A 2-pole resonator only ever rolls off at 2 poles' worth of slope no
-matter how far out you go — there's no equivalent of an FIR's stopband
-floor that keeps improving with a wider transition. For the user's
-scenario (an interferer at a pitch a few bandwidths away from
-`CW_PITCH_HZ`), a single section was only ever going to claw back
-another 15-20dB on top of whatever stage 1 already provided — nowhere
-near enough once stage 1's own rejection at that spacing is already
-limited by §7.3's roughly-constant equiripple floor.
+But a resonator cascade has a ceiling a single formula doesn't reveal:
+no matter how many *identical, synchronously-tuned* sections get added,
+the shape stays a smooth, rounded lobe - dB accumulates, but the curve
+never develops a real equiripple "wall" the way a crystal ladder filter
+does. Measured against the full stopband sweep this codebase now uses to
+judge shape factor (§8.2), the 4-section cascade never even reached
+-60dB within a 3kHz search window - its own -6dB-to-"as deep as it gets"
+ratio doesn't resolve to a clean shape factor at all, because it simply
+doesn't have a floor to reach. Good enough to ship once, not good enough
+to call "crystal-filter-grade."
 
-### 8.5 Cascading: the bandwidth-correction math
+### 8.2 The fix: a fixed 8-pole elliptic (Cauer) design
 
-The standard fix for a resonator's gentle skirt is the same one classic
-analog CW audio filters use: put several identical sections in series.
-dB is additive per stage, so N sections turn the single-section numbers
-above into roughly `N×` the dB at the same offset — 4 sections turn
-`5.3` bandwidths' `-17.0dB` into roughly `-68dB`. `NARROW_FILTER_SECTIONS`
-is `4`, chosen as a reasonable middle point (2 would barely help; 8
-starts trading a lot of extra group delay, §8.6, for diminishing
-returns) — not yet bench-tuned against real listening.
-
-The one thing cascading changes that isn't free: N identical sections,
-each independently built for some bandwidth `B`, narrow the *combined*
--3dB width of the whole cascade well below `B` itself — that's the whole
-point, it's what makes the skirt steeper, but it means naively reusing
-the single-section formula per stage would make
-`rx_audio_set_filter_bw(overall_bw_hz)` silently mean something
-narrower than its name says. The classic result for N cascaded,
-synchronously-tuned single-resonance stages gives the correction:
-
-```
-section_bw_hz = overall_bw_hz / sqrt(2^(1/N) - 1)
-```
-
-For `N=4` that factor is ≈0.4350 — each section has to be built about
-2.3× *wider* than the overall width the caller actually asked for, so
-that the combined cascade lands back on the requested width. This was
-verified numerically against the *exact* digital biquad transfer
-function (not just the idealized analog approximation the formula comes
-from) via a bisection search for the true -3dB frequencies of the actual
-cascaded difference equation, across target bandwidths of 100/200/300/
-500/800/1200Hz — the ratio held at 0.434-0.4353 throughout, accurate to
-about 0.2%, before being trusted in `narrow_filter_set_bandwidth()`.
-
-### 8.6 Settling time: why the test harness needed a longer window
-
-Once the cascade was in place and `test_rx_audio.c` extended with a case
-F matching the user's actual reported scenario (dial-center wanted
-signal vs. an interferer at `f=-3000Hz`, folding to ~2300Hz per §8.3),
-the measured rejection (72.6dB) came in noticeably below the Python
-full-chain prediction (82.6dB) — a gap worth chasing down before
-trusting either number.
-
-The cause turned out to be the test harness itself, not the filter: the
-existing 1-second measurement window (unchanged since v1) was long
-enough for every case up through the single-section stage 3, but not for
-the 4-section cascade measuring a heavily-attenuated signal. Two things
-now both contribute latency between "signal starts" and "AGC envelope
-reflects steady state": each cascaded resonant section adds its own
-ring-down, and the AGC's own 300ms release-time smoothing (§5) then has
-to catch up to an envelope that's still decaying on top of that. Neither
-alone was a problem before; stacked, they pushed convergence for a
-heavily-rejected signal out past the 1-second window.
-
-Measured directly with a 5-second, 1-second-chunked scratch test
-(processing the interferer signal in successive 1-second calls and
-reading the AGC envelope after each):
+An elliptic filter spends its poles completely differently from a
+resonator cascade: equiripple ripple across the passband, and
+transmission zeros placed deliberately right at the band edges, buying
+the steepest possible transition for a given order - which is much
+closer to what a real crystal ladder filter's Cohn/Dishal synthesis
+actually does. For the *same* 8-pole cost as the old cascade
+(`scipy.signal.ellip(4, 0.5, 50, [(700-150)/48000, (700+150)/48000],
+btype='bandpass', output='sos')` at `Fs=96000` - order 4 means 4
+second-order sections, 8 poles total, 0.5dB passband ripple, 50dB
+stopband target), the measured shape factor is:
 
 ```
-after 1s: rejection = 72.6 dB
-after 2s: rejection = 82.7 dB
-after 3s: rejection = 82.7 dB   (stable)
-after 4s: rejection = 82.7 dB
-after 5s: rejection = 82.7 dB
+-6dB bandwidth:  343 Hz
+-60dB bandwidth: 649 Hz
+shape factor:    1.89:1
 ```
 
-Convergence takes about 2 seconds for this specific heavily-attenuated
-scenario, matching the Python prediction (82.6dB) almost exactly once
-given that long. `test_rx_audio.c`'s measurement window is now 2 seconds
-(`N=192000`) across every case, not just case F, so every reported
-number in this doc and in the harness's own output reflects true
-steady state rather than an under-settled snapshot. This is a property
-of the 4-section cascade specifically — a future change to
-`NARROW_FILTER_SECTIONS` or the AGC's release constant would be worth
-re-checking against this same settling test.
+That's in the same range real CW crystal/mechanical filters land in
+(typically 1.5-2:1), and the cascade never got anywhere near it. See the
+published filter-response artifact for the two shapes plotted together -
+the cascade's smooth rounded lobe against the elliptic's near-rectangular
+mesa with visible equiripple notches right at the transition.
+
+The cost of an elliptic design is that its coefficients aren't a simple
+trig formula the old RBJ biquad's were - they come from solving elliptic
+integrals, which `scipy.signal.ellip` did once, offline. That's not
+something to redo from an audio callback, so **this stage is now a fixed
+design**, the same way stage 1's FIR coefficients are: 4 biquad sections
+with individually different, precomputed `{b0,b1,b2,a1,a2}` coefficients
+(`narrow_filter_coeffs[]` in `rx_audio.c`), cascaded through the same
+`biquad_apply()` stage 3 already used. `rx_audio_set_filter_bw()`
+existed for exactly one v3 revision and is gone again - a deliberate
+choice (see rx_audio.c's "Why elliptic, and why fixed" and rx_audio.h),
+not an oversight. scipy's `sos` output normalizes each section's `a0` to
+`1.0` (confirmed to `~1e-16` before trusting it), matching how
+`biquad_apply()` is written (no explicit division by `a0`).
+
+### 8.3 Cost check: group delay and ring time
+
+Nothing is free - an elliptic's steep transition trades against phase
+linearity near the band edges, so this was bench-checked (Python,
+`scipy.signal.group_delay`, summing each cascaded section's own group
+delay rather than forming one high-order polynomial, which loses
+precision fast for a narrowband design) before committing to it:
+
+```
+                          4-section cascade    8-pole elliptic
+group delay @ CW_PITCH_HZ:     1.9 ms               2.6 ms
+peak group delay (near edges): 2.0 ms              10.4 ms
+ring-down after a 50ms dit,
+  to -40dB:                    4.8 ms              10.9 ms
+```
+
+The number that actually matters for "does copy sound delayed" - group
+delay right at the tone itself - barely moves (well under 1ms of real
+difference, nowhere near the ~10ms threshold where a human notices audio
+lag). The cost shows up specifically near the passband edges, where the
+elliptic's equiripple phase behavior concentrates: peak group delay
+roughly quintuples, and a simulated CW dit rings about 2× longer before
+decaying to -40dB. Both numbers are still comfortably under any real
+keying speed's element duration (a dot at 40 WPM is ~30ms), so this
+wasn't expected to be audible - worth confirming by ear once this is on
+real hardware, not just asserted from the bench numbers (see §10).
+
+### 8.4 A subtlety: real-audio folding, now more extreme
+
+§7.3's rejection table has a striking result at `f=1500Hz`: rejection
+goes *negative* (-17.0dB) - the "wrong" (mirror-image) side measures
+**louder** than the "wanted" side. That is not stage 1 regressing, and
+not a new bug - it's the same real-audio folding effect first documented
+against the resonator cascade, taken further by a much sharper stage 3.
+
+Stage 2 mixes up by `+CW_PITCH_HZ` and takes the real part, and a real
+signal's spectrum is inherently mirror-symmetric around 0Hz - so a
+baseband offset of `f=-1500Hz` produces a mixed frequency of
+`700-1500=-800Hz`, which folds to an audible `+800Hz` tone, sitting right
+at the edge of stage 3's now much narrower passband (-6dB edges at
+roughly 528/872Hz). Meanwhile the "wanted" `f=+1500Hz` tone's own pitch,
+2200Hz, lands deep in the elliptic's scalloped stopband floor (§8.2's
+plot). The folded artifact, being much closer to `CW_PITCH_HZ` after
+folding, survives stage 3 *better* than the tone that was actually
+supposed to be on the wanted side - enough to flip the sign entirely,
+where the old resonator cascade only ever softened the number toward
+"unremarkable." This is an inherent consequence of a real (not complex)
+BFO mix + real narrow filter for stage 2/3, not something a sharper
+stage 3 can fix (a sharper stage 3 is what made it *more* visible) - and
+it only matters for offsets large enough to fold back near `CW_PITCH_HZ`
+(roughly beyond `2×CW_PITCH_HZ`), well outside where a real CW signal
+would be tuned in practice. `test_rx_audio.c`'s case D docstring flags
+it directly rather than letting it read as a regression.
+
+### 8.5 Settling time, re-measured for the sharper filter
+
+This codebase already learned once (against the resonator cascade) that
+a sharper stage 3 needs a longer measurement window than v1/v2 ever did
+- the filter's own ring-down grows, and the AGC's 300ms release
+smoothing (§5) then has to catch up to a still-decaying envelope on top
+of that. Because the elliptic design rings a little longer per-filter
+than the cascade did (§8.3: 10.9ms vs 4.8ms to -40dB), this was
+re-checked rather than assumed to still be fine at the previous 2-second
+window - the same "verify, don't just extrapolate" discipline this
+constant kept earning through the whole v3 effort.
+
+Measured directly with a 5-second, 1-second-chunked scratch test on the
+real 3kHz-apart scenario (`f=-3000Hz`, folding to ~2300Hz):
+
+```
+after 1s: rejection = 73.4 dB
+after 2s: rejection = 96.7 dB
+after 3s: rejection = 99.2 dB   (stable)
+after 4s: rejection = 99.2 dB
+after 5s: rejection = 99.2 dB
+```
+
+Convergence now takes closer to 3 seconds, not 2.
+`test_rx_audio.c`'s measurement window is `N=288000` (3 seconds) across
+every case as of this revision, so every reported number in this doc and
+in the harness's own output reflects true steady state. This is a
+property of the specific filter in use - a future change to the elliptic
+design's order/ripple/stopband targets, or the AGC's release constant,
+would be worth re-checking against this same settling test rather than
+assuming the window is still long enough.
+
+### 8.6 Verification summary
+
+`test_rx_audio.c`'s case F (the real scenario that motivated all of
+§8): wanted signal at dial center vs. an interferer 3kHz away, folding
+to ~2300Hz. Rejection climbed steadily as stage 3 got sharper:
+
+```
+v3 initial (1 resonator section):   ~59 dB
+resonator cascade (4 sections):     ~83 dB
+current (8-pole elliptic, fixed):   ~99 dB
+```
+
+Case E confirms the elliptic's own shape in isolation - offsets chosen
+to stay inside stage 1's flat passband, so what's measured is stage 3
+alone: essentially flat (+1.8dB) at 150Hz off `CW_PITCH_HZ`, falling
+steeply to -32.8dB by 300Hz off, and down in a scalloped -50 to -70dB
+floor by 900-1200Hz off - the near-rectangular shape §8.2 predicted,
+confirmed end-to-end in C rather than just in Python.
 
 ## 9. Master output split (L/R independence)
 
@@ -653,20 +648,33 @@ the debugging trail this caused.
   listening — particularly whether 300ms release feels right between
   CW characters, or pumps/lags noticeably.
 - **Stage 1's design point** (`Fpass=1500`/`Fstop=1900`, 327 taps, -40dB
-  stopband), **stage 3's default width** (300Hz), and
-  **`NARROW_FILTER_SECTIONS`** (4, §8.5) are all reasonable starting
-  points, not bench-tuned final answers — real on-air listening time may
-  push any of them narrower, wider, toward more/fewer cascaded sections,
-  or toward a sharper/decimated stage-1 design (§7.3) if this combination
-  of rejection and audio "feel" isn't right yet.
-- **Group delay / settling time** from the 4-section cascade (§8.6) is
-  bench-verified in the AGC-envelope sense (rejection converges within
-  ~2 seconds for a heavily-attenuated signal) but not yet checked by ear
-  for anything that matters to a live operator — e.g. whether switching
-  `rx_audio_set_filter_bw()` at runtime, or a signal fading in and out
-  (QSB, or a station starting to send), now has a perceptible "catching
-  up" lag that v1/v2/the single-section v3 didn't have.
-- **Runtime control** — `rx_audio_set_volume()` and
-  `rx_audio_set_filter_bw()` both exist but nothing calls either one yet;
-  wiring them to a future physical encoder (the `mb-radio` panel app) or
-  a CAT/rigctl extension is unstarted.
+  stopband) and **stage 3's elliptic design point** (order 4, 0.5dB
+  ripple, 50dB stopband target, 300Hz -3dB width, §8.2) are reasonable
+  starting points, not bench-tuned final answers — real on-air listening
+  time may push either narrower, wider, toward different ripple/stopband
+  targets, or toward a sharper/decimated stage-1 design (§7.3) if this
+  combination of rejection and audio "feel" isn't right yet. Since stage
+  3 is now a fixed design (§8.2), changing it means regenerating
+  `narrow_filter_coeffs[]` from Python and rebuilding, not a runtime
+  knob.
+- **Group delay / ring time / settling time** from the elliptic stage 3
+  (§8.3/§8.5) are all bench-verified numerically (group delay barely
+  moves at the tone itself; ring time and full AGC settling both grow,
+  but stay well under real CW element durations) but not yet checked by
+  ear for anything that matters to a live operator — whether a signal
+  fading in and out (QSB, or a station starting to send) now has a
+  perceptible "catching up" lag that v1/v2/the resonator-based v3
+  didn't have.
+- **The folding artifact at `f=1500Hz`** (§8.4, rejection actually
+  negative - the mirror-image side measures louder than the wanted side)
+  is understood and explained, but only 1500Hz specifically was checked
+  by this reasoning - worth scanning a denser sweep of offsets to see
+  exactly where the sign flip starts and ends, and whether it's
+  perceptible on air at all (a CW operator tuned normally shouldn't be
+  parking a wanted signal anywhere near there, but it's worth knowing the
+  actual boundary).
+- **Runtime control** — `rx_audio_set_volume()` exists but nothing calls
+  it yet; wiring it to a future physical encoder (the `mb-radio` panel
+  app) or a CAT/rigctl extension is unstarted. Stage 3's width is no
+  longer a runtime knob at all (§8.2), so there is nothing left to wire
+  up for it.
