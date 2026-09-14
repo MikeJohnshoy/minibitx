@@ -18,19 +18,22 @@ Some significant changes in the digital signal processing software design are be
      |
      v
   Mixer 1  <---  clk2, si5351 RX LO (varies with tuning)
-     |            mixes received signal to center of crystal filter
+     |            mixes received signal to xtal_filter_center - the
+     |            crystal filter's own real, measured center
      v
   Crystal filter centered at ~40.0124 MHz, based on hardware spec 
      |
      v
-  Mixer 2  <---  clk1, si5351 (FIXED, never varies, shifts output
-     |           of crystal filter to 24kHz baseband   
+  Mixer 2  <---  clk1, si5351 (fixed while receiving - xtal_filter_center
+     |           + RX_IF_FREQ_HZ; switches to bfo_freq only for the
+     |           duration of TX - see 03_tx_processing_pipeline.md),
+     |           shifts output of crystal filter to 24kHz baseband
      v
   Low IF, centered at RX_IF_HZ (24000 Hz)
      |
      v
-  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain is fixed,
-     |            set experimentally
+  ADC / wm8731 audio codec (sound.c, 96 kHz sample rate) gain set experimentally
+     |  
      v
   Software VFO (vfo.c, "lo" in radio.c) <--- FIXED at RX_IF_HZ (24000 Hz)
      |            sound.c: sound_process() calls vfo_read_iq() per sample
@@ -40,9 +43,13 @@ Some significant changes in the digital signal processing software design are be
      v
   Anti-alias FIR (antialias.c, 21 taps, applied separately to I and Q)
      |
-     v
-  handed to interface software (hpsdr_p1, USB audio out, or simple network
-            interface) to work with external applications
+     +---> hpsdr_p1.c / usb_gadget.c (UAC2) - baseband I/Q handed to an
+     |       external SDR app (04_remote_control_and_iq_output.md)
+     |
+     +---> rx_audio.c - optional local CW demod, straight to the
+             WM8731's own speaker/headphone output, no external app
+             needed (dsp_design_notes/rx_audio_demod_design.md)
+
 ```
 A transmit processing pipeline also exists (just imagine the reverse of the process abovve), currently for CW transmission only.
 
