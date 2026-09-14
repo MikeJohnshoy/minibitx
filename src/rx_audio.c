@@ -22,11 +22,12 @@
 //   2. Mix the filtered I/Q up to CW_PITCH_HZ (cw.h) and keep only the
 //      real part - same product-detector math as always,
 //      Re[(I+jQ)*(cos+jsin)] = I*cos - Q*sin.
-//   3. A NARROW real bandpass (a simple two-pole resonant filter, not an
-//      FIR) centered on CW_PITCH_HZ, doing the actual "single signal"
-//      selectivity - runtime-adjustable via rx_audio_set_filter_bw(),
-//      restored here after v2 removed it (v2's narrow width and image
-//      rejection were the same knob; v3 separates them, see below).
+//   3. A NARROW real bandpass centered on CW_PITCH_HZ, doing the actual
+//      "single signal" selectivity - an 8-pole elliptic (Cauer) IIR, a
+//      fixed design (not runtime-adjustable; see "Why elliptic, and why
+//      fixed" below), chosen to approach a classic CW crystal filter's
+//      shape factor rather than the gentler resonator-cascade shape v3
+//      shipped with initially.
 //   4. An AGC (envelope-following automatic gain control) that
 //      normalizes toward a fixed target output level - see
 //      AGC_TARGET_AMPLITUDE below for why a fixed multiplier alone
@@ -53,6 +54,25 @@
 // estimate, `N ~= (Fs/transition_Hz)*(Astop_dB/22)`, has no Fpass term
 // at all) - see docs/dsp_design_notes/rx_audio_demod_design.md SS7 for
 // the numbers that confirmed this before any code changed.
+//
+// Why elliptic, and why fixed (the first v3 -> current stage-3 change):
+// v3 originally built stage 3 from 4 identical, synchronously-tuned
+// biquad resonator sections - cheap and easy to retune live, but its
+// skirt stayed fundamentally gentle (a resonator cascade only ever rolls
+// off, it never develops the equiripple "wall" a crystal ladder filter
+// has), and its shape didn't get meaningfully sharper by adding more
+// identical sections. An elliptic (Cauer) design gets there instead: for
+// the SAME 8-pole cost, equiripple passband + zeros placed right at the
+// band edges buys a ~1.9:1 shape factor (-60dB bandwidth : -6dB
+// bandwidth) - in the same range as a real CW crystal filter, and far
+// steeper than the resonator cascade ever reached. See
+// docs/dsp_design_notes/rx_audio_demod_design.md SS8 for the measured
+// comparison (the resonator cascade and elliptic's shapes side by side).
+// The cost is that elliptic coefficients aren't a simple trig formula
+// like the old RBJ biquad's - computing them needs solving elliptic
+// integrals, not something to redo from an audio callback - so this
+// stage is now a fixed design (SSB_FIR_TAPS-style precomputed
+// coefficients, not runtime-tunable the way v3's first cut was).
 
 #include "rx_audio.h"
 #include "cw.h"
@@ -267,60 +287,57 @@ static void ssb_filter_apply(struct ssb_filter_state *f, double i_in, double q_i
     *q_out = acc_im;
 }
 
-// Stage 3: narrow real bandpass, post-demodulation. Built from cascaded
-// two-pole (biquad) resonator sections, not an FIR - deliberately so: it
-// needs to be cheaply re-tunable at runtime (rx_audio_set_filter_bw()),
-// and by this point in the chain the signal is already real, single-sided
-// audio (stage 1 already resolved the image-reject question), so there
-// is no symmetry concern left to design around - just an ordinary
-// adjustable-Q audio peaking filter, the same building block a classic
-// CW rig's analog audio filter is. RBJ Audio EQ Cookbook's
-// "constant 0dB peak gain" bandpass formula for one section:
-//   w0 = 2*pi*f0/Fs, alpha = sin(w0)/(2*Q), Q = f0/bandwidth_hz
-//   b0 =  alpha/a0, b1 = 0, b2 = -alpha/a0
-//   a1 = -2*cos(w0)/a0, a2 = (1-alpha)/a0,  a0 = 1+alpha
+// Stage 3: narrow real bandpass, post-demodulation - an 8-pole elliptic
+// (Cauer) IIR, cascaded as 4 direct-form-II biquad sections. By this
+// point in the chain the signal is already real, single-sided audio
+// (stage 1 already resolved the image-reject question), so there is no
+// symmetry concern left to design around.
 //
-// A single section's skirt is gentle - measured only ~17dB down a full
-// 1600Hz off center (5.3 "bandwidths" away, see
-// docs/dsp_design_notes/rx_audio_demod_design.md §8.4) - because a 2-pole
-// resonator just doesn't roll off steeply close-in. Cascading identical
-// sections in series is the standard fix (real CW audio filters commonly
-// use 2-4 sections this way): dB is additive per stage, so 4 sections
-// turn that -17dB into roughly -68dB at the same offset.
+// This replaced v3's original narrow filter - 4 IDENTICAL,
+// synchronously-tuned RBJ resonator sections, runtime-adjustable via a
+// simple trig formula (Q = f0/bandwidth_hz). That was cheap and easy to
+// retune live, but a resonator cascade's skirt stays fundamentally
+// gentle no matter how many sections get added - it rolls off, but never
+// develops a real equiripple "wall". An elliptic design spends the same
+// 8 poles very differently: equiripple ripple in the passband, and
+// transmission zeros placed right at the band edges, buying a ~1.9:1
+// shape factor (-60dB bandwidth : -6dB bandwidth) - in the range of a
+// real CW crystal filter, and well past what the resonator cascade ever
+// reached. See docs/dsp_design_notes/rx_audio_demod_design.md §8 for the
+// measured comparison (the two shapes plotted side by side) and the
+// group-delay/ring-time cost that comes with it (small: ~2.6ms group
+// delay at CW_PITCH_HZ vs ~1.9ms for the old cascade, well under a CW
+// element's duration at any real keying speed).
+//
+// The cost that DOES matter: elliptic coefficients aren't a simple trig
+// formula the way the old RBJ biquad's were - computing them means
+// solving elliptic integrals (scipy.signal.ellip did this once, offline,
+// not something to redo from an audio callback). So this stage is now a
+// FIXED design, like stage 1's FIR coefficients below - not
+// runtime-tunable the way v3's first cut was (rx_audio_set_filter_bw()
+// existed for exactly one v3 revision and is gone again).
+//
+// Design point: order=4 (8 poles total), 0.5dB passband ripple, 50dB
+// stopband, centered on CW_PITCH_HZ with a ~300Hz -3dB width -
+// scipy.signal.ellip(4, 0.5, 50, [(700-150)/48000, (700+150)/48000],
+// btype='bandpass', output='sos') at Fs=96000. Each row below is one
+// second-order section as {b0, b1, b2, a1, a2} - scipy's sos convention
+// already normalizes a0 to 1.0 per section (confirmed to ~1e-16 before
+// trusting it here), matching how biquad_apply() below is written.
 struct biquad_state {
-    double b0, b1, b2, a1, a2;   // coefficients (b1 always 0 for this design)
+    double b0, b1, b2, a1, a2;   // coefficients
     double x1, x2, y1, y2;       // history
 };
 
-static void biquad_set_bandpass(struct biquad_state *f, double f0_hz,
-                                 double bandwidth_hz, double fs_hz) {
-    double q = f0_hz / bandwidth_hz;
-    double w0 = 2.0 * M_PI * f0_hz / fs_hz;
-    double alpha = sin(w0) / (2.0 * q);
-    double a0 = 1.0 + alpha;
-    f->b0 =  alpha / a0;
-    f->b1 =  0.0;
-    f->b2 = -alpha / a0;
-    f->a1 = (-2.0 * cos(w0)) / a0;
-    f->a2 = (1.0 - alpha) / a0;
-}
+#define NARROW_FILTER_SECTIONS 4
 
-static double biquad_apply(struct biquad_state *f, double x) {
-    double y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
-             - f->a1 * f->y1 - f->a2 * f->y2;
-    f->x2 = f->x1; f->x1 = x;
-    f->y2 = f->y1; f->y1 = y;
-    return y;
-}
-
-#define NARROW_FILTER_SECTIONS 4   // cascaded identical biquad sections
-
-#define RX_AUDIO_FILTER_DEFAULT_BW_HZ 300   // untested starting point, same
-                                             // caveat as v1/v2's constants -
-                                             // expect to retune by ear
-#define RX_AUDIO_FILTER_MIN_HZ   20    // don't let Q run away toward infinity
-#define RX_AUDIO_FILTER_MAX_HZ 2000    // don't let it swallow stage 1's whole
-                                        // 3000Hz-wide passband
+static const double narrow_filter_coeffs[NARROW_FILTER_SECTIONS][5] = {
+    // { b0, b1, b2, a1, a2 }
+    { 0.0031347125317966271, -0.0062262711904984037, 0.003134712531796628, -1.9880750263609597, 0.99051500563718153 },
+    { 1, -1.9997094875296553, 1, -1.9906166255419793, 0.99224567397195218 },
+    { 1, -1.9948828058283654, 0.99999999999999989, -1.9932472877766807, 0.99636250549261574 },
+    { 1, -1.9992168539672679, 0.99999999999999978, -1.9963811875913184, 0.99766425853740737 },
+};
 
 struct narrow_filter_state {
     struct biquad_state stage[NARROW_FILTER_SECTIONS];
@@ -328,26 +345,12 @@ struct narrow_filter_state {
 
 static struct narrow_filter_state narrow_filter;
 
-// Cascading N identical resonant sections narrows the COMBINED -3dB
-// bandwidth well below any one section's own -3dB width (that's the
-// whole point - it's what makes the skirt steeper), so each section has
-// to be deliberately built WIDER than the bandwidth callers actually
-// want, or rx_audio_set_filter_bw(overall_bw_hz) would silently mean
-// something narrower than its name says. Classic result for N cascaded
-// synchronously-tuned single-resonance stages: a section built for
-// `overall_bw_hz / sqrt(2^(1/N) - 1)` gives the whole cascade a -3dB
-// width of exactly overall_bw_hz. Verified numerically against this
-// exact digital biquad (not just the idealized analog formula) to
-// within ~0.2% across a wide range of target bandwidths before being
-// trusted here - see
-// docs/dsp_design_notes/rx_audio_demod_design.md §8.4.
-static void narrow_filter_set_bandwidth(struct narrow_filter_state *f,
-                                         double overall_bw_hz) {
-    double correction = sqrt(pow(2.0, 1.0 / NARROW_FILTER_SECTIONS) - 1.0);
-    double section_bw_hz = overall_bw_hz / correction;
-    for (int i = 0; i < NARROW_FILTER_SECTIONS; i++)
-        biquad_set_bandpass(&f->stage[i], (double)CW_PITCH_HZ,
-                             section_bw_hz, (double)SAMPLE_RATE_HZ);
+static double biquad_apply(struct biquad_state *f, double x) {
+    double y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
+             - f->a1 * f->y1 - f->a2 * f->y2;
+    f->x2 = f->x1; f->x1 = x;
+    f->y2 = f->y1; f->y1 = y;
+    return y;
 }
 
 static double narrow_filter_apply(struct narrow_filter_state *f, double x) {
@@ -425,11 +428,14 @@ void rx_audio_init(void) {
     ssb_state.pos = 0;
 
     for (int i = 0; i < NARROW_FILTER_SECTIONS; i++) {
+        narrow_filter.stage[i].b0 = narrow_filter_coeffs[i][0];
+        narrow_filter.stage[i].b1 = narrow_filter_coeffs[i][1];
+        narrow_filter.stage[i].b2 = narrow_filter_coeffs[i][2];
+        narrow_filter.stage[i].a1 = narrow_filter_coeffs[i][3];
+        narrow_filter.stage[i].a2 = narrow_filter_coeffs[i][4];
         narrow_filter.stage[i].x1 = narrow_filter.stage[i].x2 = 0.0;
         narrow_filter.stage[i].y1 = narrow_filter.stage[i].y2 = 0.0;
     }
-    narrow_filter_set_bandwidth(&narrow_filter,
-                                 (double)RX_AUDIO_FILTER_DEFAULT_BW_HZ);
 
     agc_attack_alpha  = onepole_alpha_from_ms(AGC_ATTACK_MS);
     agc_release_alpha = onepole_alpha_from_ms(AGC_RELEASE_MS);
@@ -440,15 +446,6 @@ void rx_audio_set_volume(int percent) {
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
     rx_volume = (double)percent / 100.0;
-}
-
-void rx_audio_set_filter_bw(int bandwidth_hz) {
-    if (bandwidth_hz < RX_AUDIO_FILTER_MIN_HZ) bandwidth_hz = RX_AUDIO_FILTER_MIN_HZ;
-    if (bandwidth_hz > RX_AUDIO_FILTER_MAX_HZ) bandwidth_hz = RX_AUDIO_FILTER_MAX_HZ;
-    // Coefficients only - deliberately leaves narrow_filter's history
-    // (each section's x1/x2/y1/y2) alone, so changing width live doesn't
-    // glitch harder than the small transient any filter change causes.
-    narrow_filter_set_bandwidth(&narrow_filter, (double)bandwidth_hz);
 }
 
 double rx_audio_debug_agc_envelope(void) {
