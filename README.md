@@ -2,12 +2,13 @@
 
 minibitx is a project to experiment with software from the sbitx codebase. 
 The 'mini' in minibitx means we're assembling the minimal set of code necessary to configure and operate the sbitx hardware with the best performance possible.
-Code for each required function has been pulled from the sbitx baseline and added to minibitx.
+Code for each required function has been pulled from the sbitx baseline, refined and added to minibitx.
 minibitx can now be compiled and run on the Rpi-4 in the sbitx to demonstrate and test performance.
 Mature, highly developed external Software Defined Radio (SDR) applications are being used with minibitx to find the upper limit of the sbitx processing chain.
 Lessons learned in this project can be folded back into sbitx or used in other projects.
 
-minibitx currently has the receive processing pipeline shown below in working order though it will continue to be reviewed and refined. Note that this pipeline is largely dictated by the sbitx hardware.
+minibitx receive processing pipeline is largely dictated by the sbitx hardware.
+Some significant changes in the digital signal processing software design are being experimented with.
 
 ```
   Antenna
