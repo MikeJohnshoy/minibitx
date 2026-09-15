@@ -5,6 +5,7 @@
 // connections.
 
 #include "hpsdr_p1.h"
+#include "iq_stream.h"
 #include "si5351.h"
 #include "sound.h"
 #include "vfo.h"
@@ -137,7 +138,18 @@ int main(int argc, char **argv) {
   }
   hpsdr_poll(); // Starts the listener thread for connection/tuning requests
   printf("init: HPSDR Protocol 1 listening on UDP %d\n", HPSDR_PORT);
- 
+
+  // Lightweight multi-subscriber I/Q telemetry stream (iq_stream.c) -
+  // fully independent of HPSDR above; see its own file header for why
+  // this exists as a third path rather than another HPSDR client.
+  if (iq_stream_init() < 0) {
+    printf("init: I/Q telemetry stream unavailable on UDP %d, continuing without it\n",
+           IQ_STREAM_PORT);
+  } else {
+    iq_stream_poll();
+    printf("init: I/Q telemetry stream listening on UDP %d\n", IQ_STREAM_PORT);
+  }
+
   // Bring up the USB Audio Class (UAC2) IQ gadget, if the hardware/kernel
   // support it (needs a USB device-mode controller and libcomposite). Not a
   // hard failure if it's unavailable - minibitx keeps running over
@@ -200,6 +212,7 @@ int main(int argc, char **argv) {
   cat_stop();
   uac_stop();
   hpsdr_stop();
+  iq_stream_stop();
   hamlib_stop();
  
   printf("minibitx: shutdown complete.\n");
