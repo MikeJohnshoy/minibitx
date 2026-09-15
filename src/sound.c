@@ -62,10 +62,22 @@
 // the L channel now, set once at startup (see setup_audio_codec()) and
 // never touched again - not muted/restored around TX like the R channel
 // legitimately needs to be (see sound_set_tx_drive() and radio.c's
-// TX_MASTER_VOL). 70 is an untuned starting point, not a bench
-// calibration - adjust to taste once there's a speaker to listen to it
-// on.
-#define LOCAL_SPEAKER_GAIN_PERCENT 70
+// TX_MASTER_VOL), and NOT touched by rx_audio.c's rx_volume/the CAT `AG`
+// command either - that's a separate, purely digital multiplier applied
+// long before this analog stage (see rx_audio.c's rx_volume), so "100%"
+// on that control has never meant "as loud as this codec output can go".
+//
+// Raised from the original 70 to 100 (2026-09, on-air report: "100%
+// volume" still too quiet) - safe to run wide open here because it's
+// pure analog output gain sitting downstream of rx_audio.c's own
+// digital headroom (AGC_TARGET_AMPLITUDE rides at only ~25% of the
+// int32 clamp specifically so peaks don't clip - see rx_audio.c) -
+// removing attenuation at this stage doesn't touch that margin at all.
+// If 100 still isn't loud enough on real hardware, the next lever is
+// rx_audio.c's AGC_TARGET_AMPLITUDE itself (raising it trades away some
+// of that peak headroom, so it needs on-air listening for clipping, not
+// just a bench check).
+#define LOCAL_SPEAKER_GAIN_PERCENT 100
 
 /* ------------------------------------------------------------------ */
 /*  TX sample scaling - see docs/03_tx_processing_pipeline.md          */
