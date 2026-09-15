@@ -13,6 +13,7 @@
 #include <netinet/tcp.h>
 #include "hamlib.h"
 #include "cw.h"
+#include "rx_audio.h"
 
 extern int freq_hdr;    // current frequency, Hz - see radio.h
 extern int in_tx;       // 0 = RX, 1 = TX - see radio.h
@@ -143,6 +144,42 @@ static int handle_line(int fd, char *line)
         return 0;
     }
 
+    if (cmd[0] == 'l' && (cmd[1] == '\0' || cmd[1] == ' ')) {
+        // get_level <name> - only AF (audio/volume) is backed by anything
+        // real; everything else in the hamlib level set (RF, SQL, preamp,
+        // attenuator, ...) has no minibitx equivalent, same spirit as
+        // dump_state's empty preamp/attenuator lists above.
+        char level_name[32] = "";
+        sscanf(cmd + 1, "%31s", level_name);
+        if (strcmp(level_name, "AF") == 0) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.6f\n", rx_audio_get_volume() / 100.0);
+            send_line(fd, buf);
+            printf("rigctl: l AF -> %d%%\n", rx_audio_get_volume());
+        } else {
+            send_rprt(fd, -1);
+            printf("rigctl: l %s -> unsupported level\n", level_name);
+        }
+        return 0;
+    }
+
+    if (cmd[0] == 'L' && cmd[1] == ' ') {
+        // set_level <name> <value 0.0-1.0>
+        char level_name[32] = "";
+        double val = 0.0;
+        if (sscanf(cmd + 1, "%31s %lf", level_name, &val) == 2 &&
+            strcmp(level_name, "AF") == 0) {
+            int percent = (int)(val * 100.0 + 0.5);
+            rx_audio_set_volume(percent);
+            send_rprt(fd, 0);
+            printf("rigctl: L AF %.6f -> volume %d%%\n", val, percent);
+        } else {
+            send_rprt(fd, -1);
+            printf("rigctl: L %s -> unsupported level or bad args\n", cmd + 1);
+        }
+        return 0;
+    }
+
     if (cmd[0] == 'v' && (cmd[1] == '\0' || cmd[1] == ' ')) {
         // get_vfo - minibitx has only one VFO, always report it
         send_line(fd, "VFOA\n");
@@ -173,6 +210,9 @@ static int handle_line(int fd, char *line)
         // onboard filters, since the SDR app does all of that in
         // software - and an empty TX range, since minibitx has no TX
         // audio path yet even though radio_set_tx() can key PTT.
+        // has_get_level/has_set_level do advertise RIG_LEVEL_AF (1<<3 =
+        // 0x8, per hamlib's rig.h) - the one real level, backed by
+        // rx_audio_set_volume()/rx_audio_get_volume() via l/L AF above.
         send_line(fd, "0\n");                        // protocol version
         send_line(fd, "1\n");                        // rig model (1 = RIG_MODEL_DUMMY)
         send_line(fd, "2\n");                         // ITU region (best-effort default)
@@ -190,8 +230,8 @@ static int handle_line(int fd, char *line)
         send_line(fd, "\n");                          // attenuator list (empty)
         send_line(fd, "0x0\n");                       // has_get_func
         send_line(fd, "0x0\n");                       // has_set_func
-        send_line(fd, "0x0\n");                       // has_get_level
-        send_line(fd, "0x0\n");                       // has_set_level
+        send_line(fd, "0x8\n");                       // has_get_level (RIG_LEVEL_AF)
+        send_line(fd, "0x8\n");                       // has_set_level (RIG_LEVEL_AF)
         send_line(fd, "0x0\n");                       // has_get_parm
         send_line(fd, "0x0\n");                       // has_set_parm
         printf("rigctl: dump_state -> sent\n");
