@@ -36,6 +36,7 @@ It implements a small plain-text rigctl command set:
 | `f` / `F <hz>` | get / set frequency — `F` calls `radio_tune_to()` |
 | `t` / `T <0\|1>` | get / set PTT — `T` calls `radio_set_tx()`; any nonzero value means TX (no separate mic/data state) |
 | `m` / `M <mode> <passband>` | get / set mode — **cosmetic only**, stored but never acted on, since minibitx has no onboard demod |
+| `l` / `L <level> <value>` | get / set a hamlib "level" — only `AF` (audio/volume, 0.0-1.0) is backed by anything real, wired to `rx_audio.c`'s `rx_audio_get_volume()`/`rx_audio_set_volume()`; every other hamlib level (`RF`, `SQL`, preamp, ...) gets an error reply, same as an unknown command |
 | `chk_vfo` | always reports "not in VFO mode" (single-VFO radio) |
 | `dump_state` | minimal capability dump for client negotiation — deliberately advertises no RIT/XIT/IF-shift/preamp/attenuator/onboard-filter support, and an empty TX range (no TX audio path yet) |
 | `q` / `Q` / `quit` | disconnect |
@@ -44,6 +45,18 @@ It's a small command set on purpose: minibitx isn't the thing making
 demod/filtering decisions, the SDR app is. Point an SDR app's CAT/rig
 control at `127.0.0.1:4532` (rig model "Hamlib NET rigctl") alongside its
 HPSDR connection for live retuning.
+
+`l`/`L` is the one place this server reaches past pure rig control into
+DSP state: `AF` is the only level with anything behind it (volume of
+`rx_audio.c`'s local CW monitor - see
+[`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md)),
+so `dump_state`'s `has_get_level`/`has_set_level` advertise only
+`RIG_LEVEL_AF` (`0x8`), not the full hamlib level set. `tools/rigctl_panel.py`
+is a small standalone desktop app (Python/Tkinter, no minibitx-side
+dependency beyond this server) that talks exactly this protocol - a
+frequency readout/entry and a volume slider, meant to run on a laptop or
+the Pi's own desktop, connecting to `<pi-host>:4532` same as any other
+rigctld client. See `tools/README.md`.
 
 Every command that changes or reports state also echoes to the console,
 one line per command, e.g. `rigctl: F 7074000 -> tuned to 7074000 Hz` or
@@ -85,6 +98,7 @@ only bare "get" queries do):
 | `TQ` | get / set PTT (0/1) — another way to ask for the same thing as `TX`/`RX` |
 | `MD` | get / set mode — **cosmetic only**, same reasoning as Hamlib's `M`; defaults to `3` (CW), the one mode minibitx can actually transmit |
 | `IF` | get only — combined status string (frequency, TX/RX, mode); RIT/XIT/memory/scan/split/tone all reported as off/zero since minibitx has none of them |
+| `AG` | get / set AF (volume) gain, Kenwood format (1-digit VFO selector, ignored — single VFO — + 3-digit level 000-255) — calls the same `rx_audio_set_volume()`/`rx_audio_get_volume()` `hamlib.c`'s `l`/`L AF` already uses, just reached over the CAT wire format instead of rigctld's. FLRig's volume slider sends a continuous stream of `AG0nnn;` sets while dragged (not just on release); each one is just applied directly. |
 
 Anything else is silently ignored, matching real Kenwood radios rather
 than inventing an error reply convention that doesn't exist in the CAT
