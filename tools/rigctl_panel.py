@@ -10,14 +10,31 @@ beyond the two commands it actually exercises:
     f  / F <hz>            get / set frequency
     l AF / L AF <0.0-1.0>  get / set the local CW monitor's volume
 
+It also shows a live spectrum, fed by a second, independent UDP
+connection to src/iq_stream.c's lightweight I/Q telemetry stream (UDP
+port 4536, no relation to rigctld's TCP port above, and no relation to
+the HPSDR Protocol 1 link WSJT-X/Thetis use for their own I/Q - see
+iq_stream.h/.c's file headers for why this is its own third, minimal
+path rather than reusing either). That stream carries the same native
+96kHz baseband I/Q docs/02_rx_processing_pipeline.md describes, so what
+the spectrum plot shows spans the full ±48kHz around dial center - the
+same range docs/dsp_design_notes/antialias_filter_design.md's crystal-
+filter analysis and rx_audio_demod_design.md's AGC-placement work were
+both reasoning about, now actually visible.
+
 Meant to run on a laptop, or on the Pi's own desktop if it has one - this
 is a *client*, completely separate from the minibitx binary itself. Point
 it at the Pi's hostname/IP and the rigctld port and it just needs a TCP
-route to it - same as any other rigctld client (WSJT-X, Thetis, rigctl).
+route to it - same as any other rigctld client (WSJT-X, Thetis, rigctl) -
+plus, for the spectrum, a UDP route to the same host's port 4536 (most
+LANs/home networks impose no extra firewalling here beyond what TCP
+4532 already needed, but a locked-down network might).
 
-Requires only Python 3's standard library. tkinter usually ships with
-Python on Windows/macOS; on Debian/Raspberry Pi OS it's a separate
-package if missing: `sudo apt install python3-tk`.
+Requires Python 3's standard library plus numpy (only numpy - the
+spectrum is drawn on a plain Tkinter Canvas, no plotting library needed).
+tkinter usually ships with Python on Windows/macOS; on Debian/Raspberry
+Pi OS it's a separate package if missing: `sudo apt install python3-tk`.
+numpy: `pip install numpy` (or `sudo apt install python3-numpy`).
 
 Run it:
 
@@ -27,15 +44,37 @@ Run it:
 import json
 import os
 import socket
+import struct
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+try:
+    import numpy as np
+except ImportError:
+    print("rigctl_panel.py needs numpy for the spectrum display "
+          "(pip install numpy, or sudo apt install python3-numpy).",
+          file=sys.stderr)
+    sys.exit(1)
+
 CONFIG_PATH = os.path.expanduser("~/.minibitx_panel.json")
 DEFAULT_PORT = 4532
 POLL_INTERVAL_S = 1.0
 SOCKET_TIMEOUT_S = 2.0
+
+# --- Spectrum (iq_stream.c) ---
+IQ_STREAM_PORT = 4536          # src/iq_stream.h's IQ_STREAM_PORT
+IQ_STREAM_MAGIC = b"IQS1"
+SUBSCRIBE_INTERVAL_S = 1.0     # comfortably under iq_stream.c's 5s subscriber timeout
+FFT_SIZE = 2048                # -> 96000/2048 = 46.875 Hz/bin across the full +-48kHz span
+SPECTRUM_REDRAW_MS = 66        # ~15 fps - the FFT itself runs far faster than this and
+                                # just keeps get_latest() fresh; no need to redraw faster
+                                # than a human eye or a Tkinter Canvas benefits from
+SPECTRUM_DB_FLOOR = -100.0     # y-axis floor, dBFS-style (0dB ~= one full-scale tone -
+                                # see SpectrumClient's docstring on how that's calibrated)
+SPECTRUM_DB_CEILING = 0.0
 
 
 def load_config():
@@ -115,6 +154,113 @@ class RigctlClient:
                 return None
 
 
+class SpectrumClient:
+    """Subscribes to iq_stream.c's UDP telemetry stream and keeps a
+    rolling FFT of the most recent FFT_SIZE baseband I/Q samples ready
+    for the GUI to draw.
+
+    Fully independent of RigctlClient's TCP connection - its own UDP
+    socket, its own subscribe/keepalive traffic (iq_stream.c drops a
+    subscriber that goes quiet for 5s, so this just re-sends a bare
+    datagram every SUBSCRIBE_INTERVAL_S to stay subscribed), its own
+    receive thread. If that UDP port isn't reachable (firewalled, or an
+    older minibitx build without iq_stream.c), the spectrum panel just
+    never gets data - the frequency/volume controls over rigctld keep
+    working regardless, since the two connections don't know about each
+    other any more than iq_stream.c and hamlib.c do on the minibitx side.
+
+    dB calibration: iq_stream.c scales samples so a full-scale baseband
+    tone reads close to int16 full-scale (32767 - see iq_stream.c's file
+    header). For a Hann-windowed FFT of a single tone sitting exactly on
+    a bin center, dividing that bin's magnitude by (FFT_SIZE * mean(window))
+    recovers the input tone's amplitude - so 0dB here means "as loud as a
+    single full-scale input tone would read," a normal dBFS-style
+    reference, not an absolutely-calibrated S-meter (no different from
+    what any SDR app's own spectrum display does without a signal
+    generator to calibrate against).
+    """
+
+    def __init__(self):
+        self.sock = None
+        self.host = None
+        self.stop_event = threading.Event()
+        self.recv_thread = None
+        self.keepalive_thread = None
+        self.lock = threading.Lock()
+        self.sample_buf = np.zeros(0, dtype=np.complex128)
+        self.latest_db = None  # np.ndarray (FFT_SIZE,), fftshifted low->high freq, or None
+        self.window = np.hanning(FFT_SIZE)
+        self.window_mean = float(np.mean(self.window)) or 1.0
+
+    def start(self, host):
+        self.stop()  # tolerate start() called twice without an intervening stop()
+        self.host = host
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(0.5)
+        self.stop_event.clear()
+        self.sample_buf = np.zeros(0, dtype=np.complex128)
+        with self.lock:
+            self.latest_db = None
+        self.recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self.keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self.recv_thread.start()
+        self.keepalive_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+
+    def _keepalive_loop(self):
+        while not self.stop_event.is_set():
+            sock = self.sock
+            if sock is not None:
+                try:
+                    sock.sendto(b"S", (self.host, IQ_STREAM_PORT))
+                except OSError:
+                    pass
+            time.sleep(SUBSCRIBE_INTERVAL_S)
+
+    def _recv_loop(self):
+        while not self.stop_event.is_set():
+            sock = self.sock
+            if sock is None:
+                break
+            try:
+                data, _addr = sock.recvfrom(2048)
+            except OSError:
+                continue
+            if len(data) < 12 or data[0:4] != IQ_STREAM_MAGIC:
+                continue
+            n_samples = struct.unpack(">I", data[8:12])[0]
+            if len(data) != 12 + n_samples * 4:
+                continue  # torn/short packet - drop it, next one will be fine
+
+            raw = np.frombuffer(data, dtype=">i2", count=n_samples * 2, offset=12)
+            iq = raw.astype(np.float64).reshape(-1, 2)
+            samples = (iq[:, 0] + 1j * iq[:, 1]) / 32767.0
+
+            self.sample_buf = np.concatenate((self.sample_buf, samples))
+            if len(self.sample_buf) > FFT_SIZE * 2:
+                self.sample_buf = self.sample_buf[-FFT_SIZE * 2:]
+
+            if len(self.sample_buf) >= FFT_SIZE:
+                block = self.sample_buf[-FFT_SIZE:]
+                spectrum = np.fft.fftshift(np.fft.fft(block * self.window))
+                mag = np.abs(spectrum) / (FFT_SIZE * self.window_mean)
+                db = 20.0 * np.log10(mag + 1e-12)
+                with self.lock:
+                    self.latest_db = db
+
+    def get_latest(self):
+        with self.lock:
+            return None if self.latest_db is None else self.latest_db.copy()
+
+
 class Panel(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -125,6 +271,10 @@ class Panel(tk.Tk):
         self.poll_thread = None
         self.poll_stop = threading.Event()
         self.freq_entry_focused = False
+
+        self.spectrum = SpectrumClient()
+        self.spectrum_running = False
+        self.current_freq_hz = None
 
         cfg = load_config()
 
@@ -179,6 +329,18 @@ class Panel(tk.Tk):
         self.vol_label = ttk.Label(vol, text="50%", width=5)
         self.vol_label.grid(row=0, column=1)
 
+        # --- spectrum ---
+        spec = ttk.LabelFrame(self, text="Spectrum (±48kHz around dial)", padding=8)
+        spec.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.spectrum_canvas_w = 560
+        self.spectrum_canvas_h = 180
+        self.spectrum_canvas = tk.Canvas(spec, width=self.spectrum_canvas_w,
+                                          height=self.spectrum_canvas_h,
+                                          background="#111", highlightthickness=0)
+        self.spectrum_canvas.pack()
+        self.spectrum_status_var = tk.StringVar(value="no spectrum data yet")
+        ttk.Label(spec, textvariable=self.spectrum_status_var).pack(anchor="w", pady=(4, 0))
+
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---- connection handling ----
@@ -215,9 +377,23 @@ class Panel(tk.Tk):
         self.poll_thread = threading.Thread(target=self.poll_loop, daemon=True)
         self.poll_thread.start()
 
+        # Independent of the rigctld connection above - see SpectrumClient's
+        # docstring. Started/stopped alongside it purely because "connect"
+        # is the one button this panel has; a failure here never affects
+        # rigctld's own connection.
+        self.spectrum.start(host)
+        if not self.spectrum_running:
+            self.spectrum_running = True
+            self.after(SPECTRUM_REDRAW_MS, self.redraw_spectrum)
+
     def disconnect(self):
         self.poll_stop.set()
         self.client.disconnect()
+        self.spectrum.stop()
+        self.spectrum_running = False
+        self.current_freq_hz = None
+        self.spectrum_status_var.set("no spectrum data yet")
+        self.spectrum_canvas.delete("all")
         self.status_var.set("disconnected")
         self.status_label.configure(foreground="#a00")
         self.connect_btn.configure(text="Connect")
@@ -255,6 +431,7 @@ class Panel(tk.Tk):
             hz = int(reply)
         except ValueError:
             return
+        self.current_freq_hz = hz
         self.freq_display_var.set(f"{hz:,}".replace(",", "."))
         # Don't clobber text the operator is mid-way through typing.
         if not self.freq_entry_focused:
@@ -303,6 +480,59 @@ class Panel(tk.Tk):
         pct = int(round(self.vol_var.get()))
         val = pct / 100.0
         threading.Thread(target=lambda: self.client.query(f"L AF {val:.3f}"), daemon=True).start()
+
+    # ---- spectrum ----
+    #
+    # Runs entirely on the main/Tk thread via self.after() - SpectrumClient
+    # does its own socket work and FFT math on its own threads and just
+    # hands back a finished numpy array through get_latest(); this method
+    # only ever touches the Canvas, never blocks.
+
+    def redraw_spectrum(self):
+        if not self.spectrum_running:
+            return  # disconnect() already cleared the canvas
+        if not self.client.connected():
+            self.spectrum_running = False
+            return
+
+        db = self.spectrum.get_latest()
+        canvas = self.spectrum_canvas
+        w, h = self.spectrum_canvas_w, self.spectrum_canvas_h
+        canvas.delete("all")
+
+        if db is None:
+            self.spectrum_status_var.set(
+                f"waiting for I/Q telemetry on UDP {IQ_STREAM_PORT} "
+                "(older minibitx builds without iq_stream.c won't send any)")
+        else:
+            n = len(db)
+            xs = np.arange(n) * (w / n)
+            clipped = np.clip(db, SPECTRUM_DB_FLOOR, SPECTRUM_DB_CEILING)
+            frac = (clipped - SPECTRUM_DB_FLOOR) / (SPECTRUM_DB_CEILING - SPECTRUM_DB_FLOOR)
+            ys = h - frac * h
+            coords = np.empty(n * 2)
+            coords[0::2] = xs
+            coords[1::2] = ys
+            canvas.create_line(*coords.tolist(), fill="#3fa", width=1)
+
+            # Dial-center line plus a few frequency ticks across the full
+            # +-48kHz span this native-96kHz stream carries (see
+            # docs/dsp_design_notes/antialias_filter_design.md for what
+            # actually limits how much of that is a real, undistorted
+            # signal vs. crystal-filter skirt).
+            canvas.create_line(w / 2, 0, w / 2, h, fill="#555", dash=(2, 2))
+            for offset_hz, label in ((-48000, "-48k"), (-24000, "-24k"), (0, "dial"),
+                                      (24000, "+24k"), (48000, "+48k")):
+                x = (offset_hz + 48000) / 96000.0 * w
+                x = min(max(x, 4), w - 4)  # keep the end labels from clipping off-canvas
+                canvas.create_text(x, h - 8, text=label, fill="#999", font=("monospace", 8))
+
+            freq_note = f" (dial {self.current_freq_hz:,} Hz)".replace(",", ".") \
+                if self.current_freq_hz is not None else ""
+            self.spectrum_status_var.set(
+                f"live - {FFT_SIZE}-pt FFT, {96000 / FFT_SIZE:.1f} Hz/bin{freq_note}")
+
+        self.after(SPECTRUM_REDRAW_MS, self.redraw_spectrum)
 
 
 if __name__ == "__main__":
