@@ -6,6 +6,7 @@
 #include "decim48k.h"
 #include "hpsdr_p1.h"
 #include "hw_settings.h"
+#include "iq_stream.h"
 #include "radio.h"
 #include "rx_audio.h"
 #include "sound.h"
@@ -495,9 +496,12 @@ static void sound_process(int32_t *input_rx, int32_t *input_mic, int32_t *output
   }
 
   // hand the block's IQ to each consumer as its own copy - hpsdr_p1.c
-  // (network) and usb_gadget.c (USB Audio Class gadget) don't know about
-  // each other, and either can be active without the other
+  // (network), usb_gadget.c (USB Audio Class gadget), and iq_stream.c
+  // (the lightweight multi-subscriber telemetry stream - see its own
+  // file header) don't know about each other, and any subset of them
+  // can be active without the others
   hpsdr_send_iq(i_samples, q_samples, n_samples);
+  iq_stream_send(i_samples, q_samples, n_samples);
 
   // usb_gadget.c's UAC2 gadget is fixed at 48kHz (matches real UAC2
   // hosts like the QMX/Tab5 panadapter this was built to interoperate
