@@ -195,6 +195,32 @@ whatever's available each tick. I and Q values are scaled up before
 sending to make SDR apps happier. This file has no dependency on
 `usb_gadget.c` — each holds its own independent copy of the I/Q.
 
+## Lightweight I/Q telemetry stream (`iq_stream.c`)
+
+A third, independent way to get baseband I/Q off the box, built
+specifically so a simple client (`tools/rigctl_panel.py`'s spectrum
+display) doesn't have to implement either protocol above. Unlike HPSDR
+Protocol 1, which keeps exactly one client destination and would
+silently hand a second client the stream out from under the first, this
+supports several simultaneous subscribers - a UAC2 host, WSJT-X on
+HPSDR, and the spectrum panel here can all be pulling I/Q at once,
+independently, with none of the three aware of the others (`sound.c`
+hands each its own copy, same as the other two).
+
+UDP, port 4536. No discovery/start-stop handshake: any datagram to that
+port subscribes; a client stays subscribed by resending one at least
+once every 5 seconds, and is dropped (no explicit unsubscribe needed)
+after that. Native 96kHz I/Q, packed as 128-sample batches of (int16 I,
+int16 Q) pairs behind a small header (magic, sequence number, sample
+count) - see
+[`dsp_design_notes/iq_stream_design.md`](dsp_design_notes/iq_stream_design.md)
+for the exact wire format, the real-time-safety design (the same
+lock-free ring buffer + dedicated pacer thread pattern `hpsdr_p1.c`
+uses, plus a separately mutex-protected subscriber list - both threads
+touching that list are ordinary priority, never the audio thread, which
+is what makes a plain mutex safe there but not around the sample ring
+buffer itself), and full bench verification.
+
 ## USB Audio Class (UAC2) output
 
 `usb_gadget.c` presents the radio as a standard USB Audio Class 2.0
