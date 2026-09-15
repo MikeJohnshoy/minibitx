@@ -2,6 +2,7 @@
 
 #include "usb_gadget.h"
 #include "cw.h"
+#include "rx_audio.h"
 #include <alsa/asoundlib.h>
 #include <dirent.h>
 #include <errno.h>
@@ -842,6 +843,50 @@ static void cat_handle_command(char *cmd) {
     snprintf(log_line, sizeof(log_line), "cat: IF -> sent (freq %d, %s, mode %s)\n", freq_hdr,
              in_tx ? "TX" : "RX", cat_current_mode);
     cat_log_get(last, sizeof(last), buf, log_line);
+    return;
+  }
+
+  // --- AG: AF (volume) gain. Kenwood convention: P1 is a 1-digit VFO
+  // selector (minibitx has one VFO, so it's accepted but ignored either
+  // way), P2 is a 3-digit level, 000-255. Bare "AG" or "AG0" (no level
+  // digits) is a get; "AG0nnn" is a set - this is the exact same volume
+  // rigctld's "l"/"L AF" (hamlib.c) already exposes, just reached over
+  // the Kenwood-CAT wire format instead of rigctld's own - both paths
+  // end up calling rx_audio_set_volume()/rx_audio_get_volume(), so a
+  // change made through one is immediately visible through the other.
+  // FLRig's own volume slider sends a continuous stream of "AG0nnn;"
+  // sets while it's being dragged, one per tick, not just on release -
+  // matched here by just applying each one directly (rx_audio_set_volume()
+  // is cheap, and rigctld's panel-side "only send on release" throttling
+  // was about that panel's own poll-thread traffic, not a real
+  // requirement here).
+  if (len >= 2 && cmd[0] == 'A' && cmd[1] == 'G') {
+    if (len <= 3) {
+      // Get - "AG" or "AG0" (a lone VFO digit, no level yet).
+      static char last[16] = "";
+      char buf[16], log_line[48];
+      int percent = rx_audio_get_volume();
+      int level255 = (percent * 255 + 50) / 100; // 0-100 -> 0-255, rounded
+      if (level255 > 255)
+        level255 = 255;
+      snprintf(buf, sizeof(buf), "AG0%03d;", level255);
+      cat_send(buf);
+      snprintf(log_line, sizeof(log_line), "cat: AG -> %03d (volume %d%%)\n", level255, percent);
+      cat_log_get(last, sizeof(last), buf, log_line);
+    } else {
+      // Set - cmd[2] is the VFO digit (ignored), cmd+3 is the 3-digit
+      // level. Tolerant of anything strtol can parse there rather than
+      // demanding exactly 3 digits, same spirit as FA's plain strtol use
+      // above.
+      long level255 = strtol(cmd + 3, NULL, 10);
+      if (level255 < 0)
+        level255 = 0;
+      if (level255 > 255)
+        level255 = 255;
+      int percent = (int)((level255 * 100 + 127) / 255); // 0-255 -> 0-100, rounded
+      rx_audio_set_volume(percent);
+      printf("cat: %s -> volume %d%%\n", cmd, percent);
+    }
     return;
   }
 
