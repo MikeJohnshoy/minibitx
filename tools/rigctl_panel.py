@@ -75,6 +75,15 @@ SPECTRUM_REDRAW_MS = 66        # ~15 fps - the FFT itself runs far faster than t
 SPECTRUM_DB_FLOOR = -100.0     # y-axis floor, dBFS-style (0dB ~= one full-scale tone -
                                 # see SpectrumClient's docstring on how that's calibrated)
 SPECTRUM_DB_CEILING = 0.0
+# The FFT itself still covers the full native +-48kHz (FFT_SIZE stays
+# 2048 either way - resolution is unaffected), but only the middle
+# +-15kHz gets drawn: docs/dsp_design_notes/antialias_filter_design.md's
+# crystal-filter analysis puts the genuinely flat passband at only
+# +-17.4/17.5kHz, with an asymmetric, increasingly attenuated skirt past
+# that - so displaying the full +-48kHz mostly just shows the filter's
+# own rolloff shape rather than real signal content, which is what
+# prompted narrowing this.
+SPECTRUM_DISPLAY_HALF_SPAN_HZ = 15000
 
 
 def load_config():
@@ -242,7 +251,25 @@ class SpectrumClient:
 
             raw = np.frombuffer(data, dtype=">i2", count=n_samples * 2, offset=12)
             iq = raw.astype(np.float64).reshape(-1, 2)
-            samples = (iq[:, 0] + 1j * iq[:, 1]) / 32767.0
+            # Conjugated (-Q, not +Q) - display-orientation correction only,
+            # not a bug workaround. minibitx's raw baseband I/Q (shared
+            # identically by hpsdr_p1.c and usb_gadget.c's UAC2 gadget, not
+            # just this stream) has a real, single spectral inversion built
+            # in: vfo.c's vfo_read_iq() returns I=cos(phase)/Q=+sin(phase)
+            # with phase advancing at the *positive* RX_IF_FREQ_HZ rate, and
+            # sound.c multiplies the real IF sample by that directly with no
+            # compensating sign anywhere downstream - working through the
+            # mixing math (see docs/dsp_design_notes/iq_stream_design.md)
+            # shows a station at +Δ Hz above dial center lands at baseband
+            # frequency -Δ, i.e. tuning up moves every station right instead
+            # of the conventional-SDR-display left. That's a property of the
+            # shared RX chain every I/Q consumer (WSJT-X/Thetis on HPSDR,
+            # a UAC2 host) already lives with - not something to silently
+            # "fix" here by touching vfo.c/sound.c, which could disturb an
+            # already-working setup elsewhere. Conjugating here only flips
+            # this one display's left/right sense to match the orientation
+            # operators expect from a conventional SDR waterfall.
+            samples = (iq[:, 0] - 1j * iq[:, 1]) / 32767.0
 
             self.sample_buf = np.concatenate((self.sample_buf, samples))
             if len(self.sample_buf) > FFT_SIZE * 2:
@@ -330,7 +357,7 @@ class Panel(tk.Tk):
         self.vol_label.grid(row=0, column=1)
 
         # --- spectrum ---
-        spec = ttk.LabelFrame(self, text="Spectrum (±48kHz around dial)", padding=8)
+        spec = ttk.LabelFrame(self, text="Spectrum (±15kHz around dial)", padding=8)
         spec.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.spectrum_canvas_w = 560
         self.spectrum_canvas_h = 180
@@ -505,6 +532,14 @@ class Panel(tk.Tk):
                 f"waiting for I/Q telemetry on UDP {IQ_STREAM_PORT} "
                 "(older minibitx builds without iq_stream.c won't send any)")
         else:
+            # db spans the full native +-48kHz (fftshifted, bin 0 = -48kHz,
+            # bin FFT_SIZE/2 = dial center) - crop to the middle +-15kHz for
+            # display (see SPECTRUM_DISPLAY_HALF_SPAN_HZ's comment on why).
+            bin_hz = 96000.0 / FFT_SIZE
+            center = len(db) // 2
+            half_bins = min(int(round(SPECTRUM_DISPLAY_HALF_SPAN_HZ / bin_hz)), center)
+            db = db[center - half_bins:center + half_bins]
+
             n = len(db)
             xs = np.arange(n) * (w / n)
             clipped = np.clip(db, SPECTRUM_DB_FLOOR, SPECTRUM_DB_CEILING)
@@ -515,22 +550,23 @@ class Panel(tk.Tk):
             coords[1::2] = ys
             canvas.create_line(*coords.tolist(), fill="#3fa", width=1)
 
-            # Dial-center line plus a few frequency ticks across the full
-            # +-48kHz span this native-96kHz stream carries (see
-            # docs/dsp_design_notes/antialias_filter_design.md for what
-            # actually limits how much of that is a real, undistorted
-            # signal vs. crystal-filter skirt).
+            # Dial-center line plus frequency ticks across the displayed
+            # +-SPECTRUM_DISPLAY_HALF_SPAN_HZ span.
+            span = half_bins * bin_hz  # actual displayed half-span, close to
+                                        # SPECTRUM_DISPLAY_HALF_SPAN_HZ but
+                                        # snapped to a whole number of bins
             canvas.create_line(w / 2, 0, w / 2, h, fill="#555", dash=(2, 2))
-            for offset_hz, label in ((-48000, "-48k"), (-24000, "-24k"), (0, "dial"),
-                                      (24000, "+24k"), (48000, "+48k")):
-                x = (offset_hz + 48000) / 96000.0 * w
+            for offset_hz, label in ((-span, f"-{span/1000:.0f}k"), (-span / 2, f"-{span/2000:.0f}k"),
+                                      (0, "dial"), (span / 2, f"+{span/2000:.0f}k"),
+                                      (span, f"+{span/1000:.0f}k")):
+                x = (offset_hz + span) / (2 * span) * w
                 x = min(max(x, 4), w - 4)  # keep the end labels from clipping off-canvas
                 canvas.create_text(x, h - 8, text=label, fill="#999", font=("monospace", 8))
 
             freq_note = f" (dial {self.current_freq_hz:,} Hz)".replace(",", ".") \
                 if self.current_freq_hz is not None else ""
             self.spectrum_status_var.set(
-                f"live - {FFT_SIZE}-pt FFT, {96000 / FFT_SIZE:.1f} Hz/bin{freq_note}")
+                f"live - {FFT_SIZE}-pt FFT, {bin_hz:.1f} Hz/bin{freq_note}")
 
         self.after(SPECTRUM_REDRAW_MS, self.redraw_spectrum)
 
