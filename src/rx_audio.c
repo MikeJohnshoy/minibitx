@@ -31,7 +31,9 @@
 //   4. An AGC (envelope-following automatic gain control) that
 //      normalizes toward a fixed target output level - see
 //      AGC_TARGET_AMPLITUDE below for why a fixed multiplier alone
-//      can't work.
+//      can't work, and "Why the AGC samples the raw input, not stage 2
+//      or stage 3" below for where it measures its envelope from and
+//      why that matters.
 //
 // Why wide, not narrow (the v2 -> v3 change):
 // v2 used ONE complex filter to do both jobs at once - its passband
@@ -73,6 +75,56 @@
 // integrals, not something to redo from an audio callback - so this
 // stage is now a fixed design (SSB_FIR_TAPS-style precomputed
 // coefficients, not runtime-tunable the way v3's first cut was).
+//
+// Why the AGC samples the raw input, not stage 2 or stage 3 (found
+// on-air, 2026-09 - two iterations to get here):
+//
+// Attempt 1 (v3 as first shipped): the AGC tracked |narrowed| - stage
+// 3's OWN output - so rx_audio_debug_agc_envelope() would be a clean
+// window into the narrow filter's real selectivity (see its doc comment
+// in rx_audio.h history), immune to the AGC's own gain undoing what the
+// filter just did. Sound reasoning for the debug reading, wrong for what
+// reached the operator's ears: tuning across a CW signal, the elliptic's
+// sharp ~300Hz skirt turned out to be barely noticeable - not because it
+// wasn't working (close to 99dB rejection in the two-signal-3kHz-apart
+// test, SS8.6), but because gain = AGC_TARGET_AMPLITUDE / agc_env,
+// applied to that same narrowed signal, is a closed loop that can't help
+// but erase that signal's own amplitude variation.
+//
+// Attempt 2: moved agc_env to sample |audio| (stage 2's output - post-
+// BFO-mix, before stage 3's filter). This fixed the reported problem for
+// a single tuned signal (stage 1 barely changes across a small tuning
+// range, so the makeup gain stayed put and stage 3's real attenuation
+// finally reached the codec) - but it introduced a new one: stage 1's
+// OWN image-rejection asymmetry now fed into agc_env too, and right
+// where a mirror-image tone's folded pitch (see "the real-audio folding
+// effect" - SS8.4 in the design doc) lands close to stage 3's passband,
+// the AGC's makeup gain rose to compensate for stage 1 having already
+// suppressed that image - amplifying an already-mostly-rejected folding
+// artifact back up toward full loudness, worse than doing nothing.
+//
+// Current fix: agc_env tracks sqrt(i^2+q^2) of the RAW input samples -
+// before stage 1 does anything. For a single complex baseband tone this
+// magnitude is frequency-independent (a unit-amplitude tone has the same
+// magnitude whether it's the wanted signal or its mirror image, on
+// either side of dial center, at any offset) - so unlike attempt 2, it
+// carries none of stage 1's own frequency-selective asymmetry into the
+// AGC's gain. In effect the AGC now measures true "how much RF/audio
+// energy is in the whole captured band right now" - the most literal
+// reading of "why an AGC exists at all" (real band noise/signal levels
+// bench-measured 2025-09 swung across nearly three orders of magnitude,
+// see the comment above AGC_TARGET_AMPLITUDE) - and every later stage's
+// own frequency-dependent shaping (stage 1's image rejection, stage 3's
+// narrow selectivity, and the real-audio folding interaction between
+// them) survives into the final output completely undiluted by gain,
+// because gain no longer depends on which specific frequency produced
+// that raw energy. One side effect, expected and not a bug, same as
+// attempt 2's: a second, unrelated signal anywhere in the whole captured
+// band now pulls agc_env up and the wanted signal's makeup gain down
+// along with it - "AGC desense", the same behavior a real front-end
+// AGC has. rx_audio_debug_agc_envelope() no longer isolates any single
+// stage's shape as a result - see its doc comment in rx_audio.h for what
+// it's still useful for, and how test_rx_audio.c adapted.
 
 #include "rx_audio.h"
 #include "cw.h"
@@ -397,12 +449,16 @@ static double narrow_filter_apply(struct narrow_filter_state *f, double x) {
 static struct vfo bfo;                 // CW_PITCH_HZ mixing oscillator
 static double rx_volume = 0.5;         // 0.0-1.0 - see rx_audio_set_volume()
 
-// AGC envelope follower state - agc_env tracks a smoothed |audio|
-// estimate (of the STAGE 3 output, so it reflects the narrow filter's
-// real selectivity - see rx_audio_debug_agc_envelope() in rx_audio.h);
-// the gain applied each sample is AGC_TARGET_AMPLITUDE / agc_env, so as
-// agc_env rises/falls the output rides back toward the target instead
-// of tracking the raw input amplitude directly.
+// AGC envelope follower state - agc_env tracks a smoothed magnitude
+// estimate of the RAW input I/Q, before stage 1 even runs (see "Why the
+// AGC samples the raw input, not stage 2 or stage 3" in the file
+// header); the gain applied each sample is AGC_TARGET_AMPLITUDE /
+// agc_env, so as agc_env rises/falls the output rides back toward the
+// target instead of tracking the raw input amplitude directly - and
+// because agc_env is frequency-independent (a single tone's raw
+// magnitude doesn't depend on its frequency or which side of dial center
+// it's on), every later stage's own frequency-dependent shaping survives
+// into the final output completely undiluted by this gain.
 static double agc_env = 0.0;
 static double agc_attack_alpha, agc_release_alpha;
 
@@ -448,6 +504,12 @@ void rx_audio_set_volume(int percent) {
     rx_volume = (double)percent / 100.0;
 }
 
+int rx_audio_get_volume(void) {
+    // Round rather than truncate, so get_volume() after set_volume(x)
+    // reads back exactly x instead of drifting down by rounding error.
+    return (int)(rx_volume * 100.0 + 0.5);
+}
+
 double rx_audio_debug_agc_envelope(void) {
     return agc_env;
 }
@@ -472,14 +534,20 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
         // selectivity, decoupled from stage 1's image rejection.
         double narrowed = narrow_filter_apply(&narrow_filter, audio);
 
-        // Stage 4: AGC - track a smoothed envelope of |narrowed| (fast
-        // attack so a strong signal keying up doesn't clip before the
-        // envelope catches up, slow release so gain doesn't pump on
-        // every CW dit/dah gap), then scale so the envelope itself sits
-        // at AGC_TARGET_AMPLITUDE regardless of how large or small the
-        // raw input actually is - see the constants above for why a
-        // fixed multiplier alone can't work here.
-        double mag = fabs(narrowed);
+        // Stage 4: AGC - track a smoothed envelope of the RAW input
+        // magnitude sqrt(i^2+q^2) - before even stage 1 runs - see "Why
+        // the AGC samples the raw input, not stage 2 or stage 3" above
+        // (fast attack so a strong signal keying up doesn't clip
+        // before the envelope catches up, slow release so gain doesn't
+        // pump on every CW dit/dah gap), then scale so the envelope
+        // itself sits at AGC_TARGET_AMPLITUDE regardless of how large or
+        // small the raw input actually is - see the constants above for
+        // why a fixed multiplier alone can't work here. The resulting
+        // gain is applied to narrowed (stage 3's output) below, not to
+        // the raw input or to audio - so stage 3's own selectivity still
+        // shapes the final loudness; only the makeup gain's reference
+        // point moved.
+        double mag = sqrt(i_samples[k] * i_samples[k] + q_samples[k] * q_samples[k]);
         double alpha = (mag > agc_env) ? agc_attack_alpha : agc_release_alpha;
         agc_env += alpha * (mag - agc_env);
 
