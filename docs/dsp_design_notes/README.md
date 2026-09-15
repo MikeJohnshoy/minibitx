@@ -71,3 +71,13 @@ already used in `antialias_filter_design.md`.
   practice - the filter and AGC "work very nice"), but still not tested
   with two simultaneous signals in one buffer, on the bench or on air
   (see the doc's §8.8/§10).
+- [`iq_stream_design.md`](iq_stream_design.md) — a third, minimal I/Q
+  export path (`iq_stream.c`), independent of both `hpsdr_p1.c` (single-
+  client - a second HPSDR client would silently steal its stream) and
+  `usb_gadget.c`'s UAC2 gadget - built so `tools/rigctl_panel.py`'s
+  spectrum display can get real I/Q without implementing either
+  protocol, and so several such clients can be subscribed at once.
+  Status: implemented, bench-verified end to end (wire format,
+  multi-subscriber fan-out, subscriber timeout, the Python client's FFT
+  decode/scaling) against synthetic test tones over localhost; not yet
+  confirmed over a real LAN or against real RF.
