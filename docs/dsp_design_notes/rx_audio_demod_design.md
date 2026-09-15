@@ -33,8 +33,11 @@ selectivity (or interaction between them) can leak into the AGC's gain
 at all. §8.8's fix recovers stage 3's full ~99dB selectivity in the
 *actual heard output*, not just a debug reading, and reproduces the
 folding artifact at its original, honest ~-17dB rather than hiding or
-exaggerating it — bench-verified, not yet re-confirmed on air, and not
-yet tested with two simultaneous signals in one buffer (§8.8, §10).
+exaggerating it — bench-verified, and on-air confirmed for the
+single-signal case (2026-09: tuning across a W1AW code practice
+session, the filter's edges and the AGC both "work very nice" — see
+§8.8). Not yet tested with two simultaneous signals in one buffer, on
+the bench or on air (§8.8, §10).
 Volume is remotely controllable via the rigctld server's `l`/`L AF`
 commands (`docs/04_remote_control_and_iq_output.md`).
 
@@ -838,6 +841,15 @@ view. Not yet checked with two *simultaneous* signals in one buffer
 `rx_audio_init()` between them) - worth doing before calling this fully
 verified.
 
+**On-air confirmation (2026-09):** tuning across a W1AW code practice
+session - a steady, well-formed single CW source, ideal for actually
+feeling the skirt while tuning slowly across it - both the elliptic
+filter and this AGC fix "work very nice." This is the single-signal
+case (what Case E models, and what the original on-air report in §8.7
+was about) - the real value of a W1AW-style test signal here. The
+two-signals/busy-band case (Case F, and the "AGC desense from an
+unrelated signal" behavior described just above) is still bench-only.
+
 ## 9. Master output split (L/R independence)
 
 Related fix, landed alongside the AGC work: the WM8731's `Master`
@@ -895,16 +907,17 @@ the debugging trail this caused.
   (roughly `CW_PITCH_HZ` or more past a signal in the *wrong*
   direction), but this is now a question about the filter design itself,
   not about the AGC.
-- **§8.8's raw-input AGC hasn't been tested with two simultaneous
-  signals in one buffer** - every case in `test_rx_audio.c`, including
-  case F, still tests one tone per `rx_audio_process()` call with a
-  fresh `rx_audio_init()` between them. A real band has many signals
-  present at once; worth adding a two-tone-in-one-buffer case (or
-  testing against real antenna I/Q) to confirm the "AGC desense from an
-  unrelated in-band signal" behavior §8.8 describes qualitatively
-  actually behaves as expected quantitatively, and to get a first read on
-  how much a busy band pulls gain down for a single CW signal in
-  practice.
+- **§8.8's raw-input AGC is on-air confirmed for the single-signal
+  case** (W1AW code practice, 2026-09 - see §8.8) **but not yet tested
+  with two simultaneous signals**, on the bench or on air - every case
+  in `test_rx_audio.c`, including case F, still tests one tone per
+  `rx_audio_process()` call with a fresh `rx_audio_init()` between them.
+  A real band has many signals present at once; worth adding a
+  two-tone-in-one-buffer case (or testing against real antenna I/Q on a
+  busier part of the band) to confirm the "AGC desense from an unrelated
+  in-band signal" behavior §8.8 describes qualitatively actually behaves
+  as expected quantitatively, and to get a first read on how much a busy
+  band pulls gain down for a single CW signal in practice.
 - **Runtime control** — `rx_audio_set_volume()` is now reachable
   remotely via the rigctld server's `l`/`L AF` commands
   (`docs/04_remote_control_and_iq_output.md`), and there's a standalone
