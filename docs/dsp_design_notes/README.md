@@ -66,6 +66,8 @@ already used in `antialias_filter_design.md`.
   fade below ~500Hz sidetone pitch, matching the bench prediction), v3's
   stage split and the 4-section cascade are both bench-verified
   numerically but not yet re-confirmed on air; the raw-input AGC fix is
-  bench-verified (including against the originally-reported problem) but
-  not yet re-confirmed on air, and not yet tested with two simultaneous
-  signals in one buffer (see the doc's §8.8/§10).
+  bench-verified (including against the originally-reported problem) and
+  now on-air confirmed for the single-signal case too (2026-09, W1AW code
+  practice - the filter and AGC "work very nice"), but still not tested
+  with two simultaneous signals in one buffer, on the bench or on air
+  (see the doc's §8.8/§10).
