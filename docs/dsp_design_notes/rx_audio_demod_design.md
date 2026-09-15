@@ -1,5 +1,43 @@
 # RX Audio Demodulation: Local CW Monitor Design
 
+Status: implemented (`rx_audio.c`/`rx_audio.h`, wired into `sound.c` — see
+§6 and [`../02_rx_processing_pipeline.md`](../02_rx_processing_pipeline.md)).
+First on-air confirmation (2026-09): copyable CW audio while tuning
+through FT8-band signals on 40m, after the AGC fix in §5. v1's
+symmetric-around-zero-beat limitation was fixed in v2 by a complex
+(Hilbert-style) bandpass filter (§7); on-air listening then found v2's
+filter conflated image rejection with narrow selectivity in a way that
+made signals sound soft well before the edge of the nominal passband.
+v3 split those into two independent stages — a wide image-reject
+filter (§7) and a separate narrow post-demodulation selectivity filter
+(§8) — the more conventional phasing-receiver architecture. On-air
+listening against v3 then surfaced a real report — two CW signals 3kHz
+apart, the un-tuned one still audible quite strongly — traced to a
+resonator's skirt staying gentle no matter how many identical sections
+get cascaded (§8.1). After a resonator cascade (~83dB on that scenario)
+still didn't reach real-crystal-filter territory, stage 3 was replaced
+outright with a fixed 8-pole elliptic (Cauer) design (§8.2) — same pole
+count, ~1.9:1 shape factor (in the range of a real CW crystal filter),
+~99dB on the same scenario once fully settled (§8.5). This is now a
+committed, fixed design, not runtime-adjustable — `rx_audio_set_filter_bw()`
+existed for one revision and is gone again (§8.2). A second on-air report
+(2026-09) then found that sharp filter's own edges weren't audible while
+tuning — traced to the AGC's envelope sampling stage 3's own output, so
+its makeup gain was canceling out exactly the attenuation the operator
+was trying to hear. Fixed in two steps: first by moving the envelope to
+sample stage 2 (§8.7), which solved the reported problem but surfaced a
+further, more severe consequence of the real-audio folding effect (§8.4);
+then by moving it again, to the raw input I/Q before stage 1 even runs
+(§8.8) — frequency-independent by construction, so no downstream stage's
+selectivity (or interaction between them) can leak into the AGC's gain
+at all. §8.8's fix recovers stage 3's full ~99dB selectivity in the
+*actual heard output*, not just a debug reading, and reproduces the
+folding artifact at its original, honest ~-17dB rather than hiding or
+exaggerating it — bench-verified, not yet re-confirmed on air, and not
+yet tested with two simultaneous signals in one buffer (§8.8, §10).
+Volume is remotely controllable via the rigctld server's `l`/`L AF`
+commands (`docs/04_remote_control_and_iq_output.md`).
+
 ## 1. Background
 
 minibitx's baseband I/Q (see
@@ -144,17 +182,30 @@ of a fixed gain:
 #define AGC_MAX_GAIN 8.0e11    // ceiling so near-silence doesn't amplify toward infinity
 ```
 
-An asymmetric single-pole envelope follower tracks `|audio|` (fast
-attack, slow release), and the applied gain is
-`AGC_TARGET_AMPLITUDE / envelope`, clamped at `AGC_MAX_GAIN`. As of v3,
-the AGC tracks the envelope of stage 3's output (the narrow-filtered
-audio), not the raw post-demod signal — so the envelope reflects the
-*combined* selectivity of both filtering stages, which is what
-`rx_audio_debug_agc_envelope()`'s callers actually want to measure (see
-§7.4/§8.6). Verified with an extended `test_rx_audio.c` before delivery:
-a case at the bench-measured real amplitude (0.003) now produces output
+An asymmetric single-pole envelope follower tracks a magnitude estimate
+(fast attack, slow release), and the applied gain is
+`AGC_TARGET_AMPLITUDE / envelope`, clamped at `AGC_MAX_GAIN`. Verified
+with an extended `test_rx_audio.c` before delivery: a case at the
+bench-measured real amplitude (0.003) now produces output
 indistinguishable from a full-scale (1.0) synthetic carrier — the exact
 regression the bug above represents.
+
+Which signal `envelope` tracks changed twice after this was first
+shipped. v3 initially tracked stage 3's own output (the narrow-filtered
+audio), on the reasoning that this made the envelope reflect the
+combined selectivity of both filtering stages — which is what
+`rx_audio_debug_agc_envelope()`'s callers wanted to measure at the time
+(§7.4/§8.6). That reasoning was sound for the *debug reading*, but it had
+a real cost for what actually reached the operator's ears: because gain
+is computed from the same signal it's then applied to, the AGC couldn't
+help but cancel out exactly the loudness variation stage 3's own
+selectivity was supposed to produce. §8.7 covers the on-air report this
+caused and the first fix attempted (the envelope moved to stage 2's
+output), including a further consequence of §8.4's folding effect that
+fix surfaced; §8.8 covers the fix that actually resolved it — the
+envelope now tracks the **raw input I/Q**, before stage 1 even runs, so
+it's frequency-independent and no downstream stage's own selectivity (or
+any interaction between them) can leak into the AGC's gain at all.
 
 ## 6. Wiring into `sound.c`
 
@@ -354,7 +405,10 @@ after each C rewrite (v2 and v3) by extending `test_rx_audio.c` with a
 case D (image rejection at several `f`, comparing the AGC envelope for a
 `+f` tone against its `-f` mirror). v2's numbers matched the Python
 design prediction to one decimal place; v3's still track the same
-qualitative curve, now shaped by stage 3 too (§7.3's table, §8.4).
+qualitative curve (§7.3's table) — and, since §8.7 moved the AGC's
+envelope to sample stage 2, case D is back to being a clean stage-1-only
+measurement again, no longer shaped by stage 3's own folding behavior the
+way it briefly was (§8.4, §8.7).
 
 ### 7.5 Which side is "wanted"
 
@@ -596,6 +650,194 @@ steeply to -32.8dB by 300Hz off, and down in a scalloped -50 to -70dB
 floor by 900-1200Hz off - the near-rectangular shape §8.2 predicted,
 confirmed end-to-end in C rather than just in Python.
 
+(This section's numbers predate §8.7's AGC fix - they were measured
+against `rx_audio_debug_agc_envelope()`, which at the time reflected
+stage 3's own output. Kept here as the historical record of stage 3's
+*raw* shape; §8.7 has the current, actually-audible numbers.)
+
+### 8.7 On-air report: the sharp filter's edges weren't audible - the AGC was sampling the wrong stage
+
+(This section documents the first fix attempted, and the new problem it
+surfaced. §8.8 has the better fix that superseded it - kept here as the
+record of why the simpler-looking "just sample one stage earlier" idea
+wasn't quite right yet.)
+
+A second on-air report (2026-09), after §8.2's elliptic redesign shipped:
+tuning across a CW signal, the narrow filter's ~300Hz-wide skirt - real,
+bench-verified, ~99dB deep by §8.6 - wasn't noticeable. Not "less sharp
+than expected"; barely there at all.
+
+**Root cause.** Stage 4's AGC (§5) tracked `|narrowed|` - stage 3's own
+output - and applied `gain = AGC_TARGET_AMPLITUDE / agc_env` to that same
+signal. That's a closed loop: whatever stage 3 did to a tone's amplitude,
+the AGC measured and undid in the same breath, before it ever reached the
+codec. This was deliberate, and reasonable, for one thing:
+`rx_audio_debug_agc_envelope()`'s job of reflecting the narrow filter's
+*true, gain-independent* selectivity for bench testing (§7.4, §8.6) - but
+it meant that reading and the *actual PCM output* were two very different
+things, and only the reading showed selectivity. minibitx has no ADC/RF-
+level AGC at all (`sound.c`'s `RX_CAPTURE_GAIN_PERCENT` is a fixed analog
+gain stage, set once at startup, never touched again) - this envelope
+follower is the *only* AGC anywhere in the project, and it exists purely
+for the local CW monitor's own output level, decoupled from everything
+else minibitx does (the raw I/Q reaching HPSDR/UAC2 is untouched by it).
+
+**The fix.** `agc_env` now tracks `|audio|` - stage 2's output, i.e.
+*before* stage 3's narrow filter - while the resulting gain is still
+applied to `narrowed` (stage 3's output) for the actual PCM sample. This
+breaks the closed loop: the AGC now normalizes for general passband
+conditions (still its original job - real signal/band-noise levels
+bench-measured 2025-09 swung across nearly three orders of magnitude, §5)
+without being a function of the one filter's attenuation the operator is
+trying to hear.
+
+**Verified (`test_rx_audio.c`, now measuring actual PCM output for
+anything meant to show stage 3's effect, not the debug envelope - see
+its own updated file header):**
+
+- **Case E** (a single tone, swept across offsets that stay inside stage
+  1's flat passband - the realistic "tuning across a lone CW signal"
+  case the report was actually about): output now follows stage 3's real
+  shape almost exactly - flat through ±150Hz (0.0dB), a steep knee by
+  200-450Hz off (-11.8dB, -33.8dB, -51.9dB), then the expected
+  equiripple-scalloped floor out to -67.9dB by 1200Hz off. This is the
+  direct confirmation the fix solves the reported problem.
+- **Case B** (+5kHz, well outside stage 1's own passband): output RMS
+  now drops -50.3dB vs. an in-band carrier - real attenuation reaching
+  the codec, not normalized away.
+- **Case D** (stage-1 image rejection, `+f` vs `-f`): reads cleanly again
+  now that the envelope no longer includes stage 3's folding-driven
+  asymmetry - a sensible 4.7 -> 18.8 -> 39.6 -> 43.5 -> 41.2dB
+  progression, no more of the `+1500Hz` row's negative (image-louder-
+  than-wanted) reading §8.4 described.
+- **Case F** (the real two-signals-3kHz-apart scenario): now measures
+  ~57dB via actual output, honestly *less* than stage 3's own raw ~99dB
+  (still true, still bench-verified against the debug envelope - see the
+  note added to §8.6). The gap is the AGC-desense tradeoff of moving the
+  envelope upstream: the interferer at -3000Hz is also deep in stage 1's
+  own rejection zone, so the AGC's stage-1+2-derived envelope is smaller
+  for that scenario too, and its makeup gain rises to compensate - giving
+  back roughly the portion of attenuation that happened *before* the
+  AGC's new reference point. Case E, not Case F, is the number that
+  answers the original report - a single signal with nothing else in
+  stage 1's passband is the common case, and it now works.
+
+**A new problem this surfaced, not yet resolved.** Re-running Case D's
+`+f`/`-f` comparison against actual PCM output (rather than the
+envelope) at `f=1500Hz` - right where §8.4's real-audio folding effect
+puts `-1500Hz`'s folded tone (~800Hz) close to stage 3's passband edge,
+while `+1500Hz`'s own folded tone (~2200Hz) sits deep in stage 3's
+stopband floor - shows the wanted (`+1500Hz`) side playing back
+**~58dB quieter** than the unwanted mirror-image side, not just
+mismatched by a few dB:
+
+```
+f=1500Hz:  +f (wanted):  output RMS = 430,572
+           -f (image):   output RMS = 348,122,863   (~58dB louder)
+```
+
+Mechanism: stage 1 already attenuates the `-1500Hz` image heavily (by
+design - that's its job), so the AGC's stage-1+2-derived envelope reads
+very small for that case, and makeup gain rises to compensate - same as
+any weak in-passband signal would get boosted. But because the resulting
+*folded* tone (~800Hz) sits near stage 3's passband center, stage 3
+barely attenuates it on the way out - so that large makeup gain isn't
+being "spent" suppressing a genuinely strong signal, it's amplifying an
+already-mostly-rejected folding artifact back up to near full loudness.
+The pre-fix design didn't show this as a *loudness* problem because
+`gain = target / envelope-of-the-same-signal` always self-normalizes
+everything to the same target regardless of value - both sides of this
+same `f=1500Hz` case would have played at similarly loud, unhelpfully
+undifferentiated volume before (consistent with the original "can't hear
+any edges" report). Post-fix, the *sign* of the mismatch is worse: the
+correct signal goes quiet and a phantom image 1500Hz away goes loud,
+which reads to an operator as a spurious strong signal appearing out of
+nowhere rather than as uniform loudness. Only checked at `f=1000Hz` and
+`f=1500Hz` so far (both show it, `-9.0dB` and `-58.2dB`) - the actual
+boundary of where this starts, how narrow the affected zone is, and
+whether it's audible in normal tuning (an operator would have to tune
+roughly `CW_PITCH_HZ` or more past where they'd expect a "quiet edge",
+in the wrong direction) all need a proper sweep before this is called
+understood, let alone fixed. See §10.
+
+### 8.8 A better fix: sample the raw input instead
+
+§8.7's fix traded one problem for another - both stage 3-sampling and
+stage 2-sampling tie the AGC's gain to a signal that some upstream
+stage has *already* shaped asymmetrically by frequency (stage 3's own
+selectivity in the first case, stage 1's image rejection in the second),
+so either the AGC cancels out the very thing you're trying to measure
+in the first place, or its makeup gain compensates for one stage's
+attenuation in a way that fights a *different* stage's attenuation of
+the resulting folded tone. The idea that actually breaks this pattern
+(suggested during the write-up of §8.7's open problem): sample `agc_env`
+from `sqrt(i^2+q^2)` of the **raw input I/Q**, before stage 1 runs at
+all.
+
+The reasoning: for a single complex baseband tone, that raw magnitude is
+frequency-independent - a unit-amplitude tone reads the same magnitude
+whether it's sitting at dial center, at `+1500Hz`, or at its `-1500Hz`
+mirror image, since `sqrt(cos^2+sin^2) = 1` regardless of which
+frequency the cosine/sine pair is rotating at. Unlike stage 1's or stage
+2's output, the raw input carries none of any downstream stage's own
+frequency-selective shaping - so the AGC's gain stops being a function
+of *which* frequency produced the energy it's measuring, and starts
+being a true "how much is in the whole captured band right now" reading
+- the most literal version of "why an AGC exists at all" (§5). Every
+later stage's frequency-dependent behavior - stage 1's image rejection,
+stage 3's narrow selectivity, and the real-audio folding interaction
+between them (§8.4) - now survives into the final output completely
+undiluted, because gain no longer varies with any of it.
+
+**Verified (`test_rx_audio.c`, same methodology as §8.7 - PCM output for
+anything frequency-dependent):**
+
+- **Case D** (`+f`/`-f` image rejection): now exactly reproduces the
+  *original*, pre-any-AGC-placement-change numbers - `4.5, 35.5, 46.2,
+  34.1, -17.0 dB` at `100/300/500/1000/1500Hz` - because the raw-input
+  envelope is identical (`1.000000`) for every `+f`/`-f` pair tested, so
+  the AGC contributes zero asymmetry of its own. The `f=1500Hz` folding
+  artifact (§8.4) is back to its honest, original `-17.0dB` - not hidden
+  (§7's original design), not exaggerated to `-58dB` (§8.7's stage-2
+  fix) - just measured faithfully, because the AGC is no longer part of
+  the story either way.
+- **Case E** (single tone, stage 1's flat passband, isolating stage 3):
+  effectively unchanged from §8.7's numbers (0.0, -10.2, -32.8, -51.9,
+  -49.6, -58.7, -67.8 dB) - expected, since the raw-input envelope was
+  already constant across this offset range for the same reason §8.7's
+  stage-2 envelope was. This case still directly confirms the original
+  on-air report is fixed.
+- **Case F** (two signals 3kHz apart): now measures **99.2dB**, matching
+  stage 3's own raw selectivity (§8.6) exactly, in the *actual heard
+  output* - recovering the full number §8.7's intermediate fix could
+  only get to ~57dB on, since the raw-input AGC no longer lets stage 1's
+  attenuation of the interferer leak into the makeup gain and partially
+  compensate it back out.
+- **Case B** (+5kHz): -91.0dB - a bit deeper than §8.7's -50.3dB, for the
+  same reason as case F: nothing upstream of the raw input is inflating
+  the AGC's gain to compensate for stage 1's own attenuation of this
+  offset.
+- **Settling time**: re-checked the same way as §8.5/§8.7 (chunked
+  measurement at 1s/2s/3s on case F) - stable at 99.2dB already by 1s.
+  For these synthetic single-tone cases the raw-input envelope doesn't
+  need to settle at all (it's a constant), so the only settling left is
+  stage 3's own physical ring-down, unchanged from §8.3/§8.5 and well
+  inside the window's 3s margin.
+
+One side effect, same in kind as §8.7's (expected, not a bug): a second,
+completely unrelated signal anywhere in the whole captured passband -
+not just stage 1's ~1500-1900Hz window, the *entire* band the antialias
+filter and crystal filter pass through to the ADC - now pulls `agc_env`
+up and the wanted signal's makeup gain down. This is "AGC desense" in
+its most literal form, the same behavior a real receiver's front-end AGC
+has, and arguably the more correct trade-off of the two tried so far:
+it's what an AGC derived from actual RF/IF energy would do, rather than
+one derived from a specific demodulator stage's necessarily narrower
+view. Not yet checked with two *simultaneous* signals in one buffer
+(every case here still tests one tone per `rx_audio_process()` run,
+`rx_audio_init()` between them) - worth doing before calling this fully
+verified.
+
 ## 9. Master output split (L/R independence)
 
 Related fix, landed alongside the AGC work: the WM8731's `Master`
@@ -640,16 +882,32 @@ the debugging trail this caused.
   fading in and out (QSB, or a station starting to send) now has a
   perceptible "catching up" lag that v1/v2/the resonator-based v3
   didn't have.
-- **The folding artifact at `f=1500Hz`** (§8.4, rejection actually
-  negative - the mirror-image side measures louder than the wanted side)
-  is understood and explained, but only 1500Hz specifically was checked
-  by this reasoning - worth scanning a denser sweep of offsets to see
-  exactly where the sign flip starts and ends, and whether it's
-  perceptible on air at all (a CW operator tuned normally shouldn't be
-  parking a wanted signal anywhere near there, but it's worth knowing the
-  actual boundary).
-- **Runtime control** — `rx_audio_set_volume()` exists but nothing calls
-  it yet; wiring it to a future physical encoder (the `mb-radio` panel
-  app) or a CAT/rigctl extension is unstarted. Stage 3's width is no
-  longer a runtime knob at all (§8.2), so there is nothing left to wire
-  up for it.
+- **The folding artifact near `f=1500Hz`** (§8.4) is back to its
+  original, honest reading after §8.8's raw-input AGC fix - `-17.0dB` at
+  `f=1500Hz`, an inherent property of the filter chain itself (stage 1's
+  own asymmetric response combined with where each side's folded pitch
+  happens to land relative to stage 3's passband), not something either
+  AGC-placement attempt was creating (§8.7's stage-2 fix exaggerated it
+  to `-58dB`; the original stage-3-sampling design hid it as a loudness
+  problem entirely). Still only checked at five discrete offsets (Case
+  D) - a denser sweep would still be worth doing to map the artifact's
+  exact boundary and whether it's perceptible in realistic tuning
+  (roughly `CW_PITCH_HZ` or more past a signal in the *wrong*
+  direction), but this is now a question about the filter design itself,
+  not about the AGC.
+- **§8.8's raw-input AGC hasn't been tested with two simultaneous
+  signals in one buffer** - every case in `test_rx_audio.c`, including
+  case F, still tests one tone per `rx_audio_process()` call with a
+  fresh `rx_audio_init()` between them. A real band has many signals
+  present at once; worth adding a two-tone-in-one-buffer case (or
+  testing against real antenna I/Q) to confirm the "AGC desense from an
+  unrelated in-band signal" behavior §8.8 describes qualitatively
+  actually behaves as expected quantitatively, and to get a first read on
+  how much a busy band pulls gain down for a single CW signal in
+  practice.
+- **Runtime control** — `rx_audio_set_volume()` is now reachable
+  remotely via the rigctld server's `l`/`L AF` commands
+  (`docs/04_remote_control_and_iq_output.md`), and there's a standalone
+  `tools/rigctl_panel.py` control panel that uses it. Stage 3's width is
+  not a runtime knob at all (§8.2), so there is nothing left to wire up
+  for it.
