@@ -33,15 +33,25 @@ int xtal_filter_center = 40012400;
 int bfo_freq = 40035000;
 struct vfo lo;
 
-// rit_offset: the receive-only tuning offset described in radio.h's
-// radio_set_rit(). 0 = no RIT applied - also its value on startup and
-// after every radio_tune_to() call. Deliberately NOT involved in clk1
-// (bfo_freq) at all: clk1's two jobs (RX centering vs TX edge-placement
-// for image rejection, see cw.c's TX_IF_OFFSET_HZ comment) are both
-// fixed offsets from the crystal filter's measured center, unrelated to
-// the tuned dial frequency - RIT only ever adjusts the dial-frequency
-// term that clk2 carries, and only for RX.
+// rit_offset/rit_enabled: the receive-only tuning offset described in
+// radio.h's radio_set_rit()/radio_set_rit_enabled() - the dialed-in
+// value and whether it's currently being applied are deliberately
+// separate (see radio.h), matching a real rig's RIT knob vs its RIT
+// ON/OFF button. Both start at 0/disabled, and both go back to 0/
+// disabled on every radio_tune_to() call. Deliberately NOT involved in
+// clk1 (bfo_freq) at all: clk1's two jobs (RX centering vs TX
+// edge-placement for image rejection, see cw.c's TX_IF_OFFSET_HZ
+// comment) are both fixed offsets from the crystal filter's measured
+// center, unrelated to the tuned dial frequency - RIT only ever adjusts
+// the dial-frequency term that clk2 carries, and only for RX.
 static int rit_offset = 0;
+static int rit_enabled = 0;
+
+// What RIT is actually contributing to RX's clk2 right now - 0 whenever
+// it's disabled, regardless of what value is still remembered.
+static int rit_applied_hz(void) {
+  return rit_enabled ? rit_offset : 0;
+}
 
 // "Master"'s RIGHT channel (sound_set_tx_drive(), sound.c) is what
 // actually feeds the exciter/PA during TX - not a volume knob in the
@@ -61,6 +71,7 @@ void radio_tune_to(uint32_t f) {
   // oversight; a rig that instead preserves RIT across a retune is an
   // equally valid design, just not this one.
   rit_offset = 0;
+  rit_enabled = 0;
   // clk2 places f at the crystal filter's real center; clk1 is left
   // untouched here (it's set at startup and only ever retuned by
   // radio_tx_apply() below) - this call is also used for plain RX
@@ -73,8 +84,17 @@ void radio_tune_to(uint32_t f) {
 
 void radio_set_rit(int hz) {
   rit_offset = hz;
+  // Implicitly enables/disables to match - see this function's comment
+  // in radio.h for why rigctld's j/J (the only caller that doesn't also
+  // have radio_set_rit_enabled() available) needs this: it has no
+  // separate on/off concept, so "the value" and "on" are the same thing
+  // there. A caller that DOES want to change the value without touching
+  // enabled state has no way to ask for that through this function - use
+  // radio_set_rit_enabled() separately for that (Kenwood CAT's RU/RD do
+  // both together deliberately, see usb_gadget.c).
+  rit_enabled = (hz != 0);
   if (!in_tx) {
-    si5351bx_setfreq(2, freq_hdr + rit_offset + xtal_filter_center);
+    si5351bx_setfreq(2, freq_hdr + rit_applied_hz() + xtal_filter_center);
   }
   // else: stored only for now - radio_tx_apply()'s tx_on==0 branch below
   // applies it the moment RX resumes. TX's own clk2 line (also below)
@@ -83,6 +103,17 @@ void radio_set_rit(int hz) {
 
 int radio_get_rit(void) {
   return rit_offset;
+}
+
+void radio_set_rit_enabled(int on) {
+  rit_enabled = on ? 1 : 0;
+  if (!in_tx) {
+    si5351bx_setfreq(2, freq_hdr + rit_applied_hz() + xtal_filter_center);
+  }
+}
+
+int radio_rit_enabled(void) {
+  return rit_enabled;
 }
 
 // TX transitions run on this dedicated worker thread rather than
@@ -128,12 +159,13 @@ static void radio_tx_apply(int tx_on) {
     // Restore clk1/clk2 to their RX values - matters most for the
     // straight-key path, which (unlike hpsdr_p1.c's MOX path) has no
     // separate radio_tune_to() call of its own to undo this. clk2 adds
-    // back rit_offset here (0 if none was ever set, or if radio_tune_to()
-    // cleared it since) - RIT persists across your own TX bursts, only
-    // radio_tune_to() ever resets it, so a burst sent while RIT was
-    // dialed in must not come back to RX having silently lost it.
+    // back rit_applied_hz() here (0 if RIT was never set, cleared by a
+    // retune since, or currently disabled via radio_set_rit_enabled()) -
+    // RIT persists across your own TX bursts, only radio_tune_to() ever
+    // resets it, so a burst sent while RIT was dialed in and enabled
+    // must not come back to RX having silently lost it.
     si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
-    si5351bx_setfreq(2, freq_hdr + rit_offset + xtal_filter_center);
+    si5351bx_setfreq(2, freq_hdr + rit_applied_hz() + xtal_filter_center);
     // Restore Capture only now that the relay has actually settled - any
     // earlier would feed the DSP chain raw relay-transient noise. There
     // is no equivalent local-monitor restore needed here: unlike the
