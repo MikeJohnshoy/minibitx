@@ -9,6 +9,8 @@ beyond the two commands it actually exercises:
 
     f  / F <hz>            get / set frequency
     l AF / L AF <0.0-1.0>  get / set the local CW monitor's volume
+    u NARROW / U NARROW <0|1>  get / set the narrow (~300Hz) post-demod
+                                CW filter (rx_audio.c stage 3) on/off
 
 It also shows a live spectrum, fed by a second, independent UDP
 connection to src/iq_stream.c's lightweight I/Q telemetry stream (UDP
@@ -303,6 +305,15 @@ class Panel(tk.Tk):
         self.spectrum_running = False
         self.current_freq_hz = None
 
+        # Guards on_narrow_toggled() while apply_narrow() is syncing the
+        # checkbox from a poll reply, so reading the state back from the
+        # server never turns around and re-sends it as a fresh command -
+        # same "don't let a poll-driven UI update loop back into a
+        # network write" concern the freq entry's freq_entry_focused
+        # guard exists for, just via a plain before/after flag instead
+        # since there's no focus-in-progress signal for a checkbox.
+        self._syncing_narrow = False
+
         cfg = load_config()
 
         # --- connection row ---
@@ -356,9 +367,21 @@ class Panel(tk.Tk):
         self.vol_label = ttk.Label(vol, text="50%", width=5)
         self.vol_label.grid(row=0, column=1)
 
+        # --- narrow filter ---
+        # rx_audio.c stage 3, the ~300Hz post-demod "single signal"
+        # selectivity filter - a plain on/off toggle (not a runtime-
+        # adjustable width, see rx_audio.h), reached over rigctld's
+        # u/U NARROW (this server's own extension, not a real Hamlib
+        # function - see hamlib.c's u/U comment).
+        nf = ttk.LabelFrame(self, text="RX Filter", padding=8)
+        nf.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.narrow_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(nf, text="Narrow CW filter (~300Hz)", variable=self.narrow_var,
+                         command=self.on_narrow_toggled).grid(row=0, column=0, sticky="w")
+
         # --- spectrum ---
         spec = ttk.LabelFrame(self, text="Spectrum (±15kHz around dial)", padding=8)
-        spec.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        spec.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.spectrum_canvas_w = 560
         self.spectrum_canvas_h = 180
         self.spectrum_canvas = tk.Canvas(spec, width=self.spectrum_canvas_w,
@@ -447,11 +470,13 @@ class Panel(tk.Tk):
     def refresh_once(self):
         freq_reply = self.client.query("f")
         vol_reply = self.client.query("l AF")
-        if freq_reply is None or vol_reply is None:
+        narrow_reply = self.client.query("u NARROW")
+        if freq_reply is None or vol_reply is None or narrow_reply is None:
             self.after(0, self.disconnect)
             return
         self.after(0, lambda: self.apply_freq(freq_reply))
         self.after(0, lambda: self.apply_volume(vol_reply))
+        self.after(0, lambda: self.apply_narrow(narrow_reply))
 
     def apply_freq(self, reply):
         try:
@@ -471,6 +496,18 @@ class Panel(tk.Tk):
             return
         self.vol_var.set(pct)
         self.vol_label.configure(text=f"{pct}%")
+
+    def apply_narrow(self, reply):
+        try:
+            enabled = int(reply) != 0
+        except ValueError:
+            return
+        # Guarded (see self._syncing_narrow's comment in __init__) so this
+        # poll-driven readback never re-triggers on_narrow_toggled's own
+        # network write.
+        self._syncing_narrow = True
+        self.narrow_var.set(enabled)
+        self._syncing_narrow = False
 
     # ---- user actions ----
 
@@ -507,6 +544,15 @@ class Panel(tk.Tk):
         pct = int(round(self.vol_var.get()))
         val = pct / 100.0
         threading.Thread(target=lambda: self.client.query(f"L AF {val:.3f}"), daemon=True).start()
+
+    def on_narrow_toggled(self):
+        if self._syncing_narrow:
+            return  # apply_narrow() is syncing from a poll reply, not an operator click
+        if not self.client.connected():
+            return
+        enable = 1 if self.narrow_var.get() else 0
+        threading.Thread(target=lambda: self.client.query(f"U NARROW {enable}"),
+                          daemon=True).start()
 
     # ---- spectrum ----
     #
