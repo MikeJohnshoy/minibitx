@@ -33,6 +33,16 @@ int xtal_filter_center = 40012400;
 int bfo_freq = 40035000;
 struct vfo lo;
 
+// rit_offset: the receive-only tuning offset described in radio.h's
+// radio_set_rit(). 0 = no RIT applied - also its value on startup and
+// after every radio_tune_to() call. Deliberately NOT involved in clk1
+// (bfo_freq) at all: clk1's two jobs (RX centering vs TX edge-placement
+// for image rejection, see cw.c's TX_IF_OFFSET_HZ comment) are both
+// fixed offsets from the crystal filter's measured center, unrelated to
+// the tuned dial frequency - RIT only ever adjusts the dial-frequency
+// term that clk2 carries, and only for RX.
+static int rit_offset = 0;
+
 // "Master"'s RIGHT channel (sound_set_tx_drive(), sound.c) is what
 // actually feeds the exciter/PA during TX - not a volume knob in the
 // usual sense, even though it's set via the same volume-percent
@@ -44,6 +54,13 @@ struct vfo lo;
 
 void radio_tune_to(uint32_t f) {
   freq_hdr = f;
+  // A RIT offset dialed in against the OLD frequency has no defined
+  // meaning on a new one (different band, different QSO) - clear it
+  // rather than silently carrying it forward. See radio_set_rit()'s
+  // comment (radio.h) - this is a deliberate simplicity choice, not an
+  // oversight; a rig that instead preserves RIT across a retune is an
+  // equally valid design, just not this one.
+  rit_offset = 0;
   // clk2 places f at the crystal filter's real center; clk1 is left
   // untouched here (it's set at startup and only ever retuned by
   // radio_tx_apply() below) - this call is also used for plain RX
@@ -52,6 +69,20 @@ void radio_tune_to(uint32_t f) {
   si5351bx_setfreq(2, f + xtal_filter_center);
   vfo_start(&lo, RX_IF_FREQ_HZ, lo.phase);
   set_lpf_40mhz(f); // enable the correct LPF for this band
+}
+
+void radio_set_rit(int hz) {
+  rit_offset = hz;
+  if (!in_tx) {
+    si5351bx_setfreq(2, freq_hdr + rit_offset + xtal_filter_center);
+  }
+  // else: stored only for now - radio_tx_apply()'s tx_on==0 branch below
+  // applies it the moment RX resumes. TX's own clk2 line (also below)
+  // never adds it in the first place, so there's nothing to undo there.
+}
+
+int radio_get_rit(void) {
+  return rit_offset;
 }
 
 // TX transitions run on this dedicated worker thread rather than
@@ -96,9 +127,13 @@ static void radio_tx_apply(int tx_on) {
     radio_hw_set_tx_relay(0);
     // Restore clk1/clk2 to their RX values - matters most for the
     // straight-key path, which (unlike hpsdr_p1.c's MOX path) has no
-    // separate radio_tune_to() call of its own to undo this.
+    // separate radio_tune_to() call of its own to undo this. clk2 adds
+    // back rit_offset here (0 if none was ever set, or if radio_tune_to()
+    // cleared it since) - RIT persists across your own TX bursts, only
+    // radio_tune_to() ever resets it, so a burst sent while RIT was
+    // dialed in must not come back to RX having silently lost it.
     si5351bx_setfreq(1, xtal_filter_center + RX_IF_FREQ_HZ);
-    si5351bx_setfreq(2, freq_hdr + xtal_filter_center);
+    si5351bx_setfreq(2, freq_hdr + rit_offset + xtal_filter_center);
     // Restore Capture only now that the relay has actually settled - any
     // earlier would feed the DSP chain raw relay-transient noise. There
     // is no equivalent local-monitor restore needed here: unlike the
