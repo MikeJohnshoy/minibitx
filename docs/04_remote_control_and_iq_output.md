@@ -99,6 +99,21 @@ QMX/QMX+ already emulates for the same reason (old enough to be widely
 supported, and QMX has no genuine SSB TX either, so its command set
 already excludes modes minibitx can't produce).
 
+**FLRig setup note (field-confirmed):** in FLRig's Rig Control → Setup,
+select the **QMX** rig type, not the generic **Kenwood**/TS-480 entry.
+Both will tune and key the radio, but the generic Kenwood profile sends
+the real TS-480's *full* command set, including split-operation commands
+(`FB`/`FR`/`FT`) and menu/filter commands (`EX`/`FW`) that minibitx
+doesn't implement — harmless (silently ignored below, same as any real
+Kenwood radio would do with a command it doesn't recognize), but a real
+source of operator confusion: FLRig's split "VFO B" box under the Kenwood
+profile looks like a second frequency display and gets mistaken for a RIT
+readout, when it isn't one and RIT traffic (`RT`/`RC`/`RU`/`RD`) never
+gets sent by that box at all. The QMX profile sends exactly the reduced
+command set this file documents, its RIT control maps directly onto
+`RT`/`RC`/`RU`/`RD` below, and it's confirmed on real hardware to make
+FLRig's RIT dial move minibitx's own RIT offset correctly end-to-end.
+
 Implemented commands (Kenwood convention: "set" commands get no reply;
 only bare "get" queries do):
 
