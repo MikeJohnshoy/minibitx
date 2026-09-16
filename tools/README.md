@@ -17,7 +17,7 @@ added alongside this tool - a minibitx build from before that change
 will still connect and show frequency, but volume will read/set nothing.
 
 The spectrum is fed by a second, independent connection - UDP to
-`src/iq_stream.c`'s lightweight I/Q telemetry stream (port 4536) - kept
+`src/interfaces/iq_stream.c`'s lightweight I/Q telemetry stream (port 4536) - kept
 deliberately separate from both the HPSDR Protocol 1 link WSJT-X/Thetis
 use for their own I/Q (`hpsdr_p1.c`, single-client - a second client
 there would silently steal the stream from whichever SDR app connected
