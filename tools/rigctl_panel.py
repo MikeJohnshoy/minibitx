@@ -7,7 +7,11 @@ against minibitx's hamlib.c server (default TCP 4532 - see
 docs/04_remote_control_and_iq_output.md) - nothing here is minibitx-specific
 beyond the two commands it actually exercises:
 
-    f  / F <hz>            get / set frequency
+    f  / F <hz>            get / set frequency (F also clears RIT, below)
+    j  / J <hz>            get / set RIT - a receive-only tuning offset,
+                            +/-9999 Hz (radio.h's RIT_MAX_HZ); never
+                            applied to TX (radio.c's radio_set_rit()),
+                            and auto-cleared by the next F
     l AF / L AF <0.0-1.0>  get / set the local CW monitor's volume
     l STRENGTH             get the S-meter reading (rx_audio.c's narrowband
                             meter envelope - post image-rejection and
@@ -101,6 +105,11 @@ SPECTRUM_DISPLAY_HALF_SPAN_HZ = 15000
 STRENGTH_MIN_DB = -54   # S0, bottom of the conventional 6dB/S-unit scale
 STRENGTH_MAX_DB = 60    # generous "S9+60" ceiling
 STRENGTH_DB_PER_S_UNIT = 6.0
+
+# --- RIT ("j"/"J") ---
+# Mirrors radio.h's RIT_MAX_HZ exactly - the panel should never be able to
+# ask the server for more range than it actually accepts.
+RIT_MAX_HZ = 9999
 
 
 def s_unit_label(db):
@@ -327,6 +336,7 @@ class Panel(tk.Tk):
         self.poll_thread = None
         self.poll_stop = threading.Event()
         self.freq_entry_focused = False
+        self.rit_entry_focused = False
 
         self.spectrum = SpectrumClient()
         self.spectrum_running = False
@@ -380,9 +390,37 @@ class Panel(tk.Tk):
             ttk.Button(steps, text=label, width=5,
                        command=lambda d=delta: self.on_step_clicked(d)).pack(side="left", padx=2)
 
+        # --- RIT ---
+        # rigctld's j/J (radio.c's radio_set_rit()/radio_get_rit()) - a
+        # receive-only offset, see this file's module docstring. Unlike
+        # the narrow-filter checkbox below, there's no separate on/off
+        # bit to sync from the server - "off" IS 0 Hz, same convention
+        # real Hamlib rigs use - so Clear is just "J 0" spelled out as
+        # its own button for a one-click reset mid-QSO.
+        rit = ttk.LabelFrame(self, text="RIT - receive only (Hz)", padding=8)
+        rit.grid(row=2, column=0, sticky="ew", padx=8, pady=4)
+        self.rit_display_var = tk.StringVar(value="—")
+        ttk.Label(rit, textvariable=self.rit_display_var, font=("monospace", 16)).grid(
+            row=0, column=0, columnspan=6, pady=(0, 6))
+
+        self.rit_entry_var = tk.StringVar(value="0")
+        rit_entry = ttk.Entry(rit, textvariable=self.rit_entry_var, width=8, font=("monospace", 12))
+        rit_entry.grid(row=1, column=0, columnspan=2)
+        rit_entry.bind("<FocusIn>", lambda e: setattr(self, "rit_entry_focused", True))
+        rit_entry.bind("<FocusOut>", lambda e: setattr(self, "rit_entry_focused", False))
+        rit_entry.bind("<Return>", lambda e: self.on_rit_set_clicked())
+        ttk.Button(rit, text="Set", command=self.on_rit_set_clicked).grid(row=1, column=2, padx=4)
+        ttk.Button(rit, text="Clear", command=self.on_rit_clear_clicked).grid(row=1, column=3, padx=4)
+
+        rit_steps = ttk.Frame(rit)
+        rit_steps.grid(row=2, column=0, columnspan=6, pady=(6, 0))
+        for label, delta in [("-100", -100), ("-10", -10), ("+10", 10), ("+100", 100)]:
+            ttk.Button(rit_steps, text=label, width=5,
+                       command=lambda d=delta: self.on_rit_step_clicked(d)).pack(side="left", padx=2)
+
         # --- volume ---
         vol = ttk.LabelFrame(self, text="Volume", padding=8)
-        vol.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 8))
+        vol.grid(row=3, column=0, sticky="ew", padx=8, pady=(4, 8))
         self.vol_var = tk.IntVar(value=50)
         self.vol_scale = ttk.Scale(vol, from_=0, to=100, orient="horizontal",
                                     variable=self.vol_var, length=280,
@@ -401,7 +439,7 @@ class Panel(tk.Tk):
         # u/U NARROW (this server's own extension, not a real Hamlib
         # function - see hamlib.c's u/U comment).
         nf = ttk.LabelFrame(self, text="RX Filter", padding=8)
-        nf.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        nf.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.narrow_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(nf, text="Narrow CW filter (~300Hz)", variable=self.narrow_var,
                          command=self.on_narrow_toggled).grid(row=0, column=0, sticky="w")
@@ -411,7 +449,7 @@ class Panel(tk.Tk):
         # drive a network write, just a bar + label kept current by
         # refresh_once()'s poll, same as the frequency readout above.
         sm = ttk.LabelFrame(self, text="Signal Strength (uncalibrated)", padding=8)
-        sm.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        sm.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.smeter_canvas_w = 380
         self.smeter_canvas_h = 40
         self.smeter_canvas = tk.Canvas(sm, width=self.smeter_canvas_w,
@@ -425,7 +463,7 @@ class Panel(tk.Tk):
 
         # --- spectrum ---
         spec = ttk.LabelFrame(self, text="Spectrum (±15kHz around dial)", padding=8)
-        spec.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 8))
+        spec.grid(row=6, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.spectrum_canvas_w = 560
         self.spectrum_canvas_h = 180
         self.spectrum_canvas = tk.Canvas(spec, width=self.spectrum_canvas_w,
@@ -490,6 +528,8 @@ class Panel(tk.Tk):
         self.spectrum_canvas.delete("all")
         self.smeter_label_var.set("—")
         self.draw_smeter(None)
+        self.rit_display_var.set("—")
+        self.rit_entry_var.set("0")
         self.status_var.set("disconnected")
         self.status_label.configure(foreground="#a00")
         self.connect_btn.configure(text="Connect")
@@ -515,14 +555,16 @@ class Panel(tk.Tk):
 
     def refresh_once(self):
         freq_reply = self.client.query("f")
+        rit_reply = self.client.query("j")
         vol_reply = self.client.query("l AF")
         narrow_reply = self.client.query("u NARROW")
         strength_reply = self.client.query("l STRENGTH")
-        if freq_reply is None or vol_reply is None or narrow_reply is None \
-                or strength_reply is None:
+        if freq_reply is None or rit_reply is None or vol_reply is None \
+                or narrow_reply is None or strength_reply is None:
             self.after(0, self.disconnect)
             return
         self.after(0, lambda: self.apply_freq(freq_reply))
+        self.after(0, lambda: self.apply_rit(rit_reply))
         self.after(0, lambda: self.apply_volume(vol_reply))
         self.after(0, lambda: self.apply_narrow(narrow_reply))
         self.after(0, lambda: self.apply_strength(strength_reply))
@@ -537,6 +579,19 @@ class Panel(tk.Tk):
         # Don't clobber text the operator is mid-way through typing.
         if not self.freq_entry_focused:
             self.freq_entry_var.set(str(hz))
+
+    def apply_rit(self, reply):
+        try:
+            hz = int(reply)
+        except ValueError:
+            return
+        self.rit_display_var.set(f"{hz:+d} Hz" if hz != 0 else "0 Hz (off)")
+        # Same "don't clobber an in-progress edit" guard as the frequency
+        # entry above - matters here in particular right after an F,
+        # since radio_tune_to() auto-clears RIT server-side and the next
+        # poll tick will otherwise stomp whatever the operator just typed.
+        if not self.rit_entry_focused:
+            self.rit_entry_var.set(str(hz))
 
     def apply_volume(self, reply):
         try:
@@ -627,6 +682,35 @@ class Panel(tk.Tk):
         hz = max(0, hz + delta)
         self.freq_entry_var.set(str(hz))
         threading.Thread(target=lambda: self.client.query(f"F {hz}"), daemon=True).start()
+
+    def on_rit_set_clicked(self):
+        if not self.client.connected():
+            return
+        try:
+            hz = int(self.rit_entry_var.get().strip())
+        except ValueError:
+            messagebox.showerror("minibitx panel", "RIT must be a whole number of Hz.")
+            return
+        hz = max(-RIT_MAX_HZ, min(RIT_MAX_HZ, hz))
+        self.rit_entry_var.set(str(hz))
+        threading.Thread(target=lambda: self.client.query(f"J {hz}"), daemon=True).start()
+
+    def on_rit_clear_clicked(self):
+        if not self.client.connected():
+            return
+        self.rit_entry_var.set("0")
+        threading.Thread(target=lambda: self.client.query("J 0"), daemon=True).start()
+
+    def on_rit_step_clicked(self, delta):
+        if not self.client.connected():
+            return
+        try:
+            hz = int(self.rit_entry_var.get().strip())
+        except ValueError:
+            hz = 0
+        hz = max(-RIT_MAX_HZ, min(RIT_MAX_HZ, hz + delta))
+        self.rit_entry_var.set(str(hz))
+        threading.Thread(target=lambda: self.client.query(f"J {hz}"), daemon=True).start()
 
     def on_volume_dragged(self, _value):
         # Live label update while dragging; see on_volume_released for
