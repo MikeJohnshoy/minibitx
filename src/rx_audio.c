@@ -467,6 +467,19 @@ static int narrow_filter_enabled = 1;
 static double agc_env = 0.0;
 static double agc_attack_alpha, agc_release_alpha;
 
+// Meter envelope follower state - a second, independent tracker from
+// agc_env above, sharing its attack/release alphas but not its input or
+// its job. See "Two envelopes, two jobs" above rx_audio_get_strength_db()
+// for the full reasoning; in short, agc_env has to stay wideband for the
+// AGC's own gain math to be correct, but that makes it a poor S-meter
+// (equally loud for a signal at dial center and one 10kHz away - see
+// rx_gain_and_level_calibration.md §9's discussion of why). meter_env
+// tracks |narrowed| instead - post-stage-1-image-rejection,
+// post-stage-3-selectivity-or-bypass, pre-AGC-gain - so it reads what's
+// actually reaching the speaker, not "how much energy is anywhere in the
+// whole captured band."
+static double meter_env = 0.0;
+
 // Time-constant (not cutoff-frequency) one-pole coefficient, for the
 // AGC's attack/release smoothing - alpha such that a step input reaches
 // ~63% of the way there after time_ms.
@@ -501,6 +514,7 @@ void rx_audio_init(void) {
     agc_attack_alpha  = onepole_alpha_from_ms(AGC_ATTACK_MS);
     agc_release_alpha = onepole_alpha_from_ms(AGC_RELEASE_MS);
     agc_env = 0.0;
+    meter_env = 0.0;
 }
 
 void rx_audio_set_volume(int percent) {
@@ -525,6 +539,81 @@ int rx_audio_get_narrow_filter(void) {
 
 double rx_audio_debug_agc_envelope(void) {
     return agc_env;
+}
+
+double rx_audio_debug_meter_envelope(void) {
+    return meter_env;
+}
+
+// --- Signal strength (rigctld "l STRENGTH", hamlib.c) ---
+//
+// Two envelopes, two jobs:
+//
+// agc_env (above) has to stay wideband - sampled before stage 1 even
+// runs, frequency-independent by construction - because that's what
+// makes the AGC's own makeup gain correct (see "Why the AGC samples the
+// raw input" in the file header: a narrower tap there created a closed
+// loop that erased the very selectivity it was supposed to reveal). But
+// that same property makes it a poor S-meter: it reads the same whether
+// the tone is at dial center or 10kHz away, well outside anything
+// audible - real energy anywhere across the whole ~35kHz-wide crystal-
+// filter passband, not "how strong is what I'm listening to." First
+// shipped, this function read agc_env directly - see
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md §9 for that
+// version and the design discussion that replaced it.
+//
+// meter_env is the fix: a second, independent envelope follower (same
+// file, same attack/release alphas, its own state) that tracks |narrowed|
+// instead - stage 3's own output, or its bypass, whichever the operator
+// is actually hearing (see rx_audio_process()'s stage 4 comment). It's a
+// pure observer, never fed back into any gain, so there's no closed-loop
+// risk in tapping something this far downstream - that problem was
+// specific to using a narrow tap for the AGC's OWN gain, not to reading
+// one for display. The result: a tone outside stage 1's one-sided
+// passband, or outside stage 3's ~300Hz skirt when the narrow filter is
+// on, now reads visibly lower here, matching what's actually audible -
+// see test_rx_audio.c's Case B for the regression check.
+//
+// It still lives in the same "fraction of full scale, no dB/dBm
+// attached" space as sound.c's rf and agc_env both did - see
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md's Caveat 1:
+// nothing downstream of the ADC ties a sample value to a real RF
+// quantity without a deliberate signal-generator calibration step, and
+// that step hasn't been done here.
+//
+// RX_STRENGTH_S9_DBFS is therefore still a placeholder, not a
+// calibration - carried over unchanged from the agc_env version rather
+// than re-derived, on the reasoning that stage 1/stage 3 are close to
+// unity gain in-band (a remez equiripple design normalized near 0dB
+// passband gain), so an in-passband signal's narrowed amplitude should
+// sit in roughly the same ballpark as agc_env's used to for the same
+// signal - but that's a reasonable starting guess, not something
+// verified against real hardware, and worth rechecking against §6's bench
+// data (or new data of its own) once this is on the air. Real calibration
+// still means injecting a known level (the conventional -73dBm = S9
+// reference) from a signal generator into the antenna port and reading
+// back meter_env at that point, per that doc's §2 procedure - and per
+// that same doc's caveats, checking it holds at more than one band before
+// trusting it, since RX_CAPTURE_GAIN_PERCENT's flatness across HF is
+// itself unverified.
+#define RX_STRENGTH_S9_DBFS -40.0
+
+// Clamp range for the reported number, in dB relative to RX_STRENGTH_S9_DBFS -
+// S0 (-54dB, the bottom of the conventional 6dB/S-unit S0-S9 scale) up to
+// a generous S9+60dB ceiling. Only clamps what's reported; meter_env,
+// agc_env, and the AGC itself keep working across their own full range
+// regardless.
+#define RX_STRENGTH_MIN_DB (-54)
+#define RX_STRENGTH_MAX_DB   60
+
+int rx_audio_get_strength_db(void) {
+    // Guard against log10(0) the same way the AGC's own gain math guards
+    // agc_env's denominator, just up here instead of at every call site.
+    double dbfs = 20.0 * log10(meter_env > 1e-12 ? meter_env : 1e-12);
+    double rel = dbfs - RX_STRENGTH_S9_DBFS;
+    if (rel < RX_STRENGTH_MIN_DB) rel = RX_STRENGTH_MIN_DB;
+    if (rel > RX_STRENGTH_MAX_DB) rel = RX_STRENGTH_MAX_DB;
+    return (int)(rel >= 0.0 ? rel + 0.5 : rel - 0.5);  // round half away from zero
 }
 
 void rx_audio_process(const double *i_samples, const double *q_samples,
@@ -570,6 +659,22 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
 
         double gain = AGC_TARGET_AMPLITUDE / (agc_env > 1e-9 ? agc_env : 1e-9);
         if (gain > AGC_MAX_GAIN) gain = AGC_MAX_GAIN;
+
+        // Meter envelope - a SECOND, independent follower, same shape as
+        // the AGC's own above (same attack/release alphas - no new time
+        // constants to tune yet) but tapping |narrowed| instead of the
+        // raw input's complex magnitude. See "Two envelopes, two jobs"
+        // above rx_audio_get_strength_db() for why this can't just reuse
+        // agc_env, and why tapping narrowed specifically (not audio, not
+        // filtered) is what makes it track "what's actually reaching the
+        // speaker" through both stage 1's image rejection and stage 3's
+        // selectivity/bypass state. Purely a read-only observer - it
+        // never feeds back into gain, so none of the closed-loop problems
+        // that ruled out an early-narrower AGC tap (see the file header)
+        // apply here.
+        double meter_mag = fabs(narrowed);
+        double meter_alpha = (meter_mag > meter_env) ? agc_attack_alpha : agc_release_alpha;
+        meter_env += meter_alpha * (meter_mag - meter_env);
 
         double sample = narrowed * gain * rx_volume;
         if (sample >  2000000000.0) sample =  2000000000.0;
