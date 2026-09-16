@@ -43,7 +43,7 @@ Some significant changes in the digital signal processing software design are be
      v
   Anti-alias FIR (antialias.c, 21 taps, applied separately to I and Q)
      |
-     +---> hpsdr_p1.c / usb_gadget.c (UAC2) - baseband I/Q handed to an
+     +---> hpsdr_p1.c / usb_gadget.c (UAC2) / iq_stream.c - baseband I/Q handed to an
      |       external SDR app (04_remote_control_and_iq_output.md)
      |
      +---> rx_audio.c - optional local CW demod, straight to the
