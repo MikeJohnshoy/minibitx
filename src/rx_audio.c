@@ -449,6 +449,11 @@ static double narrow_filter_apply(struct narrow_filter_state *f, double x) {
 static struct vfo bfo;                 // CW_PITCH_HZ mixing oscillator
 static double rx_volume = 0.5;         // 0.0-1.0 - see rx_audio_set_volume()
 
+// 1 (default) = stage 3 shapes the output, matching every design note
+// above; 0 = stage 3 is bypassed (audio from stage 2 reaches the AGC
+// directly). See rx_audio_set_narrow_filter().
+static int narrow_filter_enabled = 1;
+
 // AGC envelope follower state - agc_env tracks a smoothed magnitude
 // estimate of the RAW input I/Q, before stage 1 even runs (see "Why the
 // AGC samples the raw input, not stage 2 or stage 3" in the file
@@ -510,6 +515,14 @@ int rx_audio_get_volume(void) {
     return (int)(rx_volume * 100.0 + 0.5);
 }
 
+void rx_audio_set_narrow_filter(int enable) {
+    narrow_filter_enabled = (enable != 0);
+}
+
+int rx_audio_get_narrow_filter(void) {
+    return narrow_filter_enabled;
+}
+
 double rx_audio_debug_agc_envelope(void) {
     return agc_env;
 }
@@ -532,7 +545,11 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
 
         // Stage 3: narrow real bandpass - the actual single-signal
         // selectivity, decoupled from stage 1's image rejection.
-        double narrowed = narrow_filter_apply(&narrow_filter, audio);
+        // Always run, even when bypassed below, so its history stays
+        // warm and there's no settling-time thump the moment the
+        // operator switches it back on mid-signal.
+        double filtered = narrow_filter_apply(&narrow_filter, audio);
+        double narrowed = narrow_filter_enabled ? filtered : audio;
 
         // Stage 4: AGC - track a smoothed envelope of the RAW input
         // magnitude sqrt(i^2+q^2) - before even stage 1 runs - see "Why
