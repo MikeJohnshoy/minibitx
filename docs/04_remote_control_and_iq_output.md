@@ -5,7 +5,13 @@ external control surface tunes and keys the radio, and how the baseband
 I/Q produced in
 [`02_rx_processing_pipeline.md`](02_rx_processing_pipeline.md) gets to
 the SDR application actually using it. The two are documented together
-because one file — `hpsdr_p1.c` — does both jobs.
+because one file — `hpsdr_p1.c` — does both jobs. Every file this
+document covers (`hpsdr_p1.c`, `usb_gadget.c`, `iq_stream.c`, `hamlib.c`)
+lives under `src/interfaces/` - kept separate from the DSP/radio-control
+core (`sound.c`, `rx_audio.c`, `radio.c`, `cw.c`, `vfo.c`, ...) in plain
+`src/`, since none of these four decide anything about the signal path
+themselves - they only carry state in and out of it for whichever
+external app is on the other end.
 
 ## The single-entry-point pattern
 
