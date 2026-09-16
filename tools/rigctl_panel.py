@@ -13,7 +13,7 @@ beyond the two commands it actually exercises:
                                 CW filter (rx_audio.c stage 3) on/off
 
 It also shows a live spectrum, fed by a second, independent UDP
-connection to src/iq_stream.c's lightweight I/Q telemetry stream (UDP
+connection to src/interfaces/iq_stream.c's lightweight I/Q telemetry stream (UDP
 port 4536, no relation to rigctld's TCP port above, and no relation to
 the HPSDR Protocol 1 link WSJT-X/Thetis use for their own I/Q - see
 iq_stream.h/.c's file headers for why this is its own third, minimal
@@ -67,7 +67,7 @@ POLL_INTERVAL_S = 1.0
 SOCKET_TIMEOUT_S = 2.0
 
 # --- Spectrum (iq_stream.c) ---
-IQ_STREAM_PORT = 4536          # src/iq_stream.h's IQ_STREAM_PORT
+IQ_STREAM_PORT = 4536          # src/interfaces/iq_stream.h's IQ_STREAM_PORT
 IQ_STREAM_MAGIC = b"IQS1"
 SUBSCRIBE_INTERVAL_S = 1.0     # comfortably under iq_stream.c's 5s subscriber timeout
 FFT_SIZE = 2048                # -> 96000/2048 = 46.875 Hz/bin across the full +-48kHz span
