@@ -9,6 +9,13 @@ beyond the two commands it actually exercises:
 
     f  / F <hz>            get / set frequency
     l AF / L AF <0.0-1.0>  get / set the local CW monitor's volume
+    l STRENGTH             get the S-meter reading (rx_audio.c's narrowband
+                            meter envelope - post image-rejection and
+                            narrow-filter-or-bypass, so it reflects what's
+                            actually audible, not the AGC's own wideband
+                            envelope - dB relative to a placeholder S9, see
+                            rx_audio_get_strength_db()'s comment; read-only,
+                            same as a real rig's S-meter)
     u NARROW / U NARROW <0|1>  get / set the narrow (~300Hz) post-demod
                                 CW filter (rx_audio.c stage 3) on/off
 
@@ -86,6 +93,26 @@ SPECTRUM_DB_CEILING = 0.0
 # own rolloff shape rather than real signal content, which is what
 # prompted narrowing this.
 SPECTRUM_DISPLAY_HALF_SPAN_HZ = 15000
+
+# --- Signal strength ("l STRENGTH") ---
+# Mirrors rx_audio.c's RX_STRENGTH_MIN_DB/MAX_DB exactly, so the bar
+# always spans the full range the server can ever report - no clipping
+# against a range chosen independently on this end.
+STRENGTH_MIN_DB = -54   # S0, bottom of the conventional 6dB/S-unit scale
+STRENGTH_MAX_DB = 60    # generous "S9+60" ceiling
+STRENGTH_DB_PER_S_UNIT = 6.0
+
+
+def s_unit_label(db):
+    """Format a dB-relative-to-S9 reading the way an operator reads an
+    S-meter: "S1".."S9" below/at S9, "S9+N" above it - the same
+    convention real Hamlib clients (and rx_audio_get_strength_db()'s own
+    comment) use."""
+    if db <= 0:
+        s = round(9 + db / STRENGTH_DB_PER_S_UNIT)
+        s = max(0, min(9, s))
+        return f"S{s}"
+    return f"S9+{db}"
 
 
 def load_config():
@@ -379,9 +406,26 @@ class Panel(tk.Tk):
         ttk.Checkbutton(nf, text="Narrow CW filter (~300Hz)", variable=self.narrow_var,
                          command=self.on_narrow_toggled).grid(row=0, column=0, sticky="w")
 
+        # --- signal strength ("l STRENGTH") ---
+        # Read-only, like a real rig's S-meter - no slider/checkbox to
+        # drive a network write, just a bar + label kept current by
+        # refresh_once()'s poll, same as the frequency readout above.
+        sm = ttk.LabelFrame(self, text="Signal Strength (uncalibrated)", padding=8)
+        sm.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.smeter_canvas_w = 380
+        self.smeter_canvas_h = 40
+        self.smeter_canvas = tk.Canvas(sm, width=self.smeter_canvas_w,
+                                        height=self.smeter_canvas_h,
+                                        background="#111", highlightthickness=0)
+        self.smeter_canvas.grid(row=0, column=0)
+        self.smeter_label_var = tk.StringVar(value="—")
+        ttk.Label(sm, textvariable=self.smeter_label_var, font=("monospace", 13),
+                   width=15).grid(row=0, column=1, padx=(10, 0))
+        self.draw_smeter(None)
+
         # --- spectrum ---
         spec = ttk.LabelFrame(self, text="Spectrum (±15kHz around dial)", padding=8)
-        spec.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
+        spec.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 8))
         self.spectrum_canvas_w = 560
         self.spectrum_canvas_h = 180
         self.spectrum_canvas = tk.Canvas(spec, width=self.spectrum_canvas_w,
@@ -444,6 +488,8 @@ class Panel(tk.Tk):
         self.current_freq_hz = None
         self.spectrum_status_var.set("no spectrum data yet")
         self.spectrum_canvas.delete("all")
+        self.smeter_label_var.set("—")
+        self.draw_smeter(None)
         self.status_var.set("disconnected")
         self.status_label.configure(foreground="#a00")
         self.connect_btn.configure(text="Connect")
@@ -471,12 +517,15 @@ class Panel(tk.Tk):
         freq_reply = self.client.query("f")
         vol_reply = self.client.query("l AF")
         narrow_reply = self.client.query("u NARROW")
-        if freq_reply is None or vol_reply is None or narrow_reply is None:
+        strength_reply = self.client.query("l STRENGTH")
+        if freq_reply is None or vol_reply is None or narrow_reply is None \
+                or strength_reply is None:
             self.after(0, self.disconnect)
             return
         self.after(0, lambda: self.apply_freq(freq_reply))
         self.after(0, lambda: self.apply_volume(vol_reply))
         self.after(0, lambda: self.apply_narrow(narrow_reply))
+        self.after(0, lambda: self.apply_strength(strength_reply))
 
     def apply_freq(self, reply):
         try:
@@ -496,6 +545,53 @@ class Panel(tk.Tk):
             return
         self.vol_var.set(pct)
         self.vol_label.configure(text=f"{pct}%")
+
+    def apply_strength(self, reply):
+        try:
+            db = int(reply)
+        except ValueError:
+            return
+        self.smeter_label_var.set(f"{s_unit_label(db)} ({db:+d}dB)")
+        self.draw_smeter(db)
+
+    def draw_smeter(self, db):
+        """Draws the S-meter bar. db=None (not connected / no reading yet)
+        just shows the empty scale. Range and tick points match
+        rx_audio.c's RX_STRENGTH_MIN_DB/MAX_DB and the l STRENGTH
+        convention (0 = S9, 6dB/S-unit below it, "S9+NdB" above) - see
+        this file's module docstring and rx_audio_get_strength_db()'s own
+        comment for why this reading is relative/uncalibrated, not a
+        wattmeter-grade dBm number."""
+        canvas = self.smeter_canvas
+        w, h = self.smeter_canvas_w, self.smeter_canvas_h
+        canvas.delete("all")
+
+        span = STRENGTH_MAX_DB - STRENGTH_MIN_DB
+
+        def x_of(value_db):
+            frac = (value_db - STRENGTH_MIN_DB) / span
+            return max(0.0, min(1.0, frac)) * w
+
+        # S9 boundary: green (S-units) to the left, amber ("+dB") to the
+        # right - the same two-tone convention a real analog S-meter face
+        # uses.
+        s9_x = x_of(0)
+        canvas.create_rectangle(0, 10, s9_x, h - 10, fill="#1a4", outline="")
+        canvas.create_rectangle(s9_x, 10, w, h - 10, fill="#a71", outline="")
+
+        # Tick marks + labels across the S-unit and "+dB" zones.
+        for tick_db, label in ((-48, "S1"), (-36, "S3"), (-24, "S5"),
+                                 (-12, "S7"), (0, "S9"), (20, "+20"), (40, "+40")):
+            x = x_of(tick_db)
+            canvas.create_line(x, 10, x, h - 10, fill="#000", width=1)
+            canvas.create_text(x, h - 2, text=label, fill="#ccc",
+                                 font=("monospace", 7), anchor="s")
+
+        # Current reading - a bright vertical needle/cursor, matching the
+        # spectrum canvas's own dial-center marker style.
+        if db is not None:
+            x = x_of(db)
+            canvas.create_line(x, 4, x, h - 4, fill="#fff", width=2)
 
     def apply_narrow(self, reply):
         try:
