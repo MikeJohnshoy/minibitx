@@ -37,6 +37,7 @@ It implements a small plain-text rigctl command set:
 | `t` / `T <0\|1>` | get / set PTT — `T` calls `radio_set_tx()`; any nonzero value means TX (no separate mic/data state) |
 | `m` / `M <mode> <passband>` | get / set mode — **cosmetic only**, stored but never acted on, since minibitx has no onboard demod |
 | `l` / `L <level> <value>` | get / set a hamlib "level" — only `AF` (audio/volume, 0.0-1.0) is backed by anything real, wired to `rx_audio.c`'s `rx_audio_get_volume()`/`rx_audio_set_volume()`; every other hamlib level (`RF`, `SQL`, preamp, ...) gets an error reply, same as an unknown command |
+| `u` / `U <func> <0\|1>` | get / set a hamlib "function" — only `NARROW` is backed by anything real: toggles `rx_audio.c`'s stage-3 narrow (~300Hz) post-demod CW filter on/off via `rx_audio_get_narrow_filter()`/`rx_audio_set_narrow_filter()`. `NARROW` isn't a name real Hamlib ships in its own function table — this server only ever talks to `tools/rigctl_panel.py`, not stock `rigctl`, so there's no compatibility reason to hunt for a closer standard name. Everything else gets an error reply. |
 | `chk_vfo` | always reports "not in VFO mode" (single-VFO radio) |
 | `dump_state` | minimal capability dump for client negotiation — deliberately advertises no RIT/XIT/IF-shift/preamp/attenuator/onboard-filter support, and an empty TX range (no TX audio path yet) |
 | `q` / `Q` / `quit` | disconnect |
@@ -46,17 +47,21 @@ demod/filtering decisions, the SDR app is. Point an SDR app's CAT/rig
 control at `127.0.0.1:4532` (rig model "Hamlib NET rigctl") alongside its
 HPSDR connection for live retuning.
 
-`l`/`L` is the one place this server reaches past pure rig control into
-DSP state: `AF` is the only level with anything behind it (volume of
-`rx_audio.c`'s local CW monitor - see
-[`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md)),
-so `dump_state`'s `has_get_level`/`has_set_level` advertise only
-`RIG_LEVEL_AF` (`0x8`), not the full hamlib level set. `tools/rigctl_panel.py`
+`l`/`L` and `u`/`U` are the two places this server reaches past pure rig
+control into DSP state: `AF` is the only level with anything behind it
+(volume of `rx_audio.c`'s local CW monitor), and `NARROW` is the only
+function with anything behind it (that same monitor's narrow post-demod
+selectivity filter) - see
+[`dsp_design_notes/rx_audio_demod_design.md`](dsp_design_notes/rx_audio_demod_design.md).
+`dump_state`'s `has_get_level`/`has_set_level` advertise only
+`RIG_LEVEL_AF` (`0x8`), not the full hamlib level set; `has_get_func`/
+`has_set_func` stay `0x0` regardless, since `NARROW` isn't a real
+`RIG_FUNC` bit to advertise under (see the table above). `tools/rigctl_panel.py`
 is a small standalone desktop app (Python/Tkinter, no minibitx-side
 dependency beyond this server) that talks exactly this protocol - a
-frequency readout/entry and a volume slider, meant to run on a laptop or
-the Pi's own desktop, connecting to `<pi-host>:4532` same as any other
-rigctld client. See `tools/README.md`.
+frequency readout/entry, a volume slider, and a narrow-filter checkbox,
+meant to run on a laptop or the Pi's own desktop, connecting to
+`<pi-host>:4532` same as any other rigctld client. See `tools/README.md`.
 
 Every command that changes or reports state also echoes to the console,
 one line per command, e.g. `rigctl: F 7074000 -> tuned to 7074000 Hz` or
