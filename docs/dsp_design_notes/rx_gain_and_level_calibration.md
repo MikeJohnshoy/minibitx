@@ -12,7 +12,12 @@ also found that the analog gain stage this doc originally pointed at
 (`'Line'`) is actually just an on/off switch, not a gain control - see
 §3 for that corrected story. This still records the original design
 discussion (2026-09) about how to approach setting/verifying RX gain, so
-the reasoning and the right order of operations aren't lost.
+the reasoning and the right order of operations aren't lost. §9 (2026-09)
+covers a later, related feature: a relative, uncalibrated S-meter
+exposed over rigctld as the standard Hamlib `l STRENGTH` level - first
+built on `rx_audio.c`'s AGC envelope, then replaced with its own
+independent, narrowband envelope once the AGC-envelope version turned
+out to be a poor S-meter (see §9 for why, and for the current design).
 
 ## 1. Background
 
@@ -257,3 +262,92 @@ See
 [`03_tx_processing_pipeline.md`](../03_tx_processing_pipeline.md)
 for where that sits in the TX sequence. Pure safety measure - no effect
 on RX sensitivity or TX power.
+
+## 9. Signal strength (rigctld `l STRENGTH`)
+
+A natural follow-on question once RX gain was validated: does an
+S-meter even make sense here, given Caveat 1 above (nothing ties a
+sample to a real RF quantity without a deliberate calibration step)?
+Two different bars turned out to be worth separating:
+
+- **Relative/uncalibrated** - "is this signal louder than that one,"
+  "how active is this band right now" - genuinely useful with no
+  calibration step at all, and cheap: it can ride on an envelope
+  `rx_audio.c` is already tracking somewhere in its processing chain,
+  rather than adding a new measurement path.
+- **Wattmeter/signal-generator-calibrated** - "this station is really
+  S7," a true dBm-referenced reading - a separate, bigger project:
+  inject a known level (the conventional -73dBm = S9 reference) from a
+  signal generator into the antenna port and derive a real dB-per-code
+  factor, per §2's procedure, then check it holds across more than one
+  band before trusting it (RX_CAPTURE_GAIN_PERCENT's own flatness across
+  HF is still unverified - §5). Not done. Real S-meters on commercial
+  gear are commonly off by 10-20dB from the IARU S9=-73dBm convention
+  anyway, so this buys consistency against your own bench, not against
+  anyone else's radio.
+
+Only the relative version is implemented, and it went through two
+designs before landing:
+
+**v1 - `agc_env` (retired).** `rx_audio.c`'s AGC already tracks
+`agc_env`, a smoothed envelope of the raw baseband I/Q magnitude,
+measured before any of stages 1-3 do any frequency-selective shaping
+(see rx_audio.c's "Why the AGC samples the raw input" and
+`rx_audio_debug_agc_envelope()`'s own comment) - frequency-independent
+by construction, and already sampled at exactly the point Caveat 1 says
+any such measurement should start from (the same "fraction of full
+scale, no dB/dBm attached" space as `sound.c`'s `rf`). That
+frequency-independence is exactly right for the AGC's own gain math (see
+the file header for why a narrower tap there caused real problems), but
+it makes a poor S-meter: it reads the same whether a signal sits at dial
+center or 10kHz away, well outside anything audible - real energy
+anywhere across the whole ~35kHz-wide crystal-filter passband, not "how
+strong is what I'm listening to" (2026-09 design discussion - see
+"AGC desense" in rx_audio.c's file header, the same property that made
+the meter over-report on a busy band).
+
+**v2 - `meter_env` (current).** A second, independent envelope follower,
+sharing agc_env's attack/release alphas but not its input or its job:
+it tracks `|narrowed|` - stage 3's own output, or its bypass, whichever
+the operator is actually hearing (see `rx_audio_process()`'s stage 4
+comment) - instead of the raw input. It's a pure observer, never fed
+back into any gain, so tapping something this far downstream carries
+none of the closed-loop risk that ruled out a narrower tap for the AGC's
+*own* gain (see the file header again) - that problem was specific to
+using a narrow tap to control gain, not to reading one for display. The
+result: a tone outside stage 1's one-sided ~3kHz passband, or outside
+stage 3's ~300Hz skirt when the narrow filter is on, now reads visibly
+lower, matching what's actually audible - see `test_rx_audio.c`'s Case B
+for the regression check (a full-scale tone at +5kHz offset, well
+outside stage 1's passband, reads dramatically lower than the same tone
+at dial center - agc_env-based v1 would have read the two identically).
+
+`rx_audio_get_strength_db()` (`rx_audio.c`/`.h`) converts `meter_env` to
+dBFS and reports it as an integer number of dB relative to
+`RX_STRENGTH_S9_DBFS` (a `#define`, currently -40.0dBFS, carried over
+unchanged from v1 rather than re-derived - stage 1/3 are close to unity
+passband gain by design, so an in-passband signal's `narrowed` amplitude
+should sit in roughly the same ballpark v1's bench data did, but that's
+a reasonable starting guess, not something verified against real
+hardware). The result is clamped to [-54, +60] (`RX_STRENGTH_MIN_DB`/
+`MAX_DB` - S0 up to a generous "S9+60" ceiling) and reported read-only
+over rigctld's `l STRENGTH` (`hamlib.c`) - a real Hamlib `RIG_LEVEL`
+(`RIG_LEVEL_STRENGTH`, `1<<30` = `0x40000000` per hamlib's `rig.h`),
+unlike the `u`/`U NARROW` extension above, so it's implemented in the
+standard convention real Hamlib clients expect (0 = S9, negative below
+it in 6dB/S-unit steps, positive as "S9+NdB") rather than a
+minibitx-only shape. `dump_state`'s `has_get_level` advertises it
+(`0x40000008` = `RIG_LEVEL_AF | RIG_LEVEL_STRENGTH`); `has_set_level`
+deliberately doesn't, same as a real rig - there's no "set the S-meter."
+`tools/rigctl_panel.py` polls it alongside frequency/volume/narrow-filter
+and draws it as a small S1-S9/"+dB" bar, labeled "Signal Strength
+(uncalibrated)" so the GUI itself doesn't imply more precision than
+this actually has.
+
+If the wattmeter/signal-generator-calibrated version ever happens,
+`RX_STRENGTH_S9_DBFS` is still the one constant that needs to change -
+the rest of the plumbing (the dBFS-to-S9-relative math, the clamp range,
+the rigctld level, the GUI bar) stays the same either way. `agc_env`
+itself is untouched by any of this - it still exists, still drives the
+AGC's own gain exactly as before, and `rx_audio_debug_agc_envelope()` is
+still there for that purpose; only the S-meter stopped reading it.
