@@ -2,6 +2,12 @@
 
 #include "usb_gadget.h"
 #include "cw.h"
+#include "radio.h"    // freq_hdr, in_tx, radio_tune_to()/radio_set_tx(),
+                       // RIT_MAX_HZ, radio_get_rit()/radio_set_rit()/
+                       // radio_rit_enabled()/radio_set_rit_enabled() -
+                       // previously hand-declared below one at a time;
+                       // now pulled in directly (same cleanup hamlib.c
+                       // got when it needed RIT_MAX_HZ too).
 #include "rx_audio.h"
 #include <alsa/asoundlib.h>
 #include <dirent.h>
@@ -17,11 +23,6 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
-
-extern int freq_hdr; // current frequency, Hz - see radio.h
-extern int in_tx;    // 0 = RX, 1 = TX - see radio.h
-extern void radio_tune_to(uint32_t f);
-extern void radio_set_tx(int tx_on);
 
 /* ---------------------------------------------------------------------
  * Compile-time configuration
@@ -760,6 +761,63 @@ static void cat_handle_command(char *cmd) {
     return;
   }
 
+  // --- RT: RIT on/off - bare "RT;" is a get (replies "RT0;"/"RT1;"),
+  // "RT0;"/"RT1;" is a set. Maps straight onto radio_set_rit_enabled()/
+  // radio_rit_enabled() (radio.h) - the value itself (radio_get_rit())
+  // is untouched either way, exactly like a real rig's RIT ON/OFF
+  // button leaves whatever's dialed into the RIT knob alone. See
+  // docs/04_remote_control_and_iq_output.md for why this needed a real
+  // enable bit in radio.c rather than reusing rigctld's offset-only
+  // model (hamlib.c's j/J, which has no separate on/off concept at
+  // all - 0 Hz IS off there). ---
+  if (len >= 2 && cmd[0] == 'R' && cmd[1] == 'T') {
+    if (len == 2) {
+      static char last[8] = "";
+      char buf[8], log_line[64];
+      snprintf(buf, sizeof(buf), "RT%d;", radio_rit_enabled() ? 1 : 0);
+      cat_send(buf);
+      snprintf(log_line, sizeof(log_line), "cat: RT -> %s (%+d Hz)\n",
+               radio_rit_enabled() ? "on" : "off", radio_get_rit());
+      cat_log_get(last, sizeof(last), buf, log_line);
+    } else {
+      int on = (cmd[2] != '0');
+      radio_set_rit_enabled(on);
+      printf("cat: RT%c -> RIT %s (%+d Hz)\n", cmd[2], on ? "on" : "off", radio_get_rit());
+    }
+    return;
+  }
+
+  // --- RC: RIT/XIT clear - real Kenwood rigs zero the offset itself
+  // (not just disable it), so this calls radio_set_rit(0) rather than
+  // radio_set_rit_enabled(0) - same call rigctld's "J 0" makes, which
+  // also implicitly disables (see radio_set_rit()'s comment, radio.h).
+  // No reply, matching TX/RX/TQ-set's bare-command convention above. ---
+  if (len == 2 && strncmp(cmd, "RC", 2) == 0) {
+    radio_set_rit(0);
+    printf("cat: RC -> RIT cleared\n");
+    return;
+  }
+
+  // --- RU / RD: step RIT up/down by a fixed CAT_RIT_STEP_HZ per call,
+  // clamped to +/-RIT_MAX_HZ. Real Kenwood rigs accept an optional
+  // digit-count suffix ("RU005;") selecting how many of the rig's own
+  // configured step sizes to move - accepted here but ignored rather
+  // than guessed at, since minibitx has no configured step size to
+  // multiply and this hasn't been checked against a real rig's exact
+  // convention. Implicitly (re-)enables RIT via radio_set_rit(), same
+  // as turning a real RIT knob does regardless of the ON/OFF button's
+  // last state. ---
+#define CAT_RIT_STEP_HZ 10
+  if (len >= 2 && cmd[0] == 'R' && (cmd[1] == 'U' || cmd[1] == 'D')) {
+    int delta = (cmd[1] == 'U') ? CAT_RIT_STEP_HZ : -CAT_RIT_STEP_HZ;
+    int hz = radio_get_rit() + delta;
+    if (hz > RIT_MAX_HZ) hz = RIT_MAX_HZ;
+    if (hz < -RIT_MAX_HZ) hz = -RIT_MAX_HZ;
+    radio_set_rit(hz);
+    printf("cat: R%c -> RIT %+d Hz\n", cmd[1], hz);
+    return;
+  }
+
   // --- TX / RX: bare, immediate, no reply (Kenwood convention) - same
   // entry point and same "local CW key wins" guard as Hamlib's T. ---
   if (len == 2 && strncmp(cmd, "TX", 2) == 0) {
@@ -826,22 +884,31 @@ static void cat_handle_command(char *cmd) {
   // 5-char signed RIT offset, RIT on/off, XIT on/off, memory bank,
   // 2-digit memory channel, TX/RX, mode, VFO/memory, scan, split, tone
   // status, 2-digit tone number, one reserved digit) with everything
-  // minibitx doesn't have (RIT/XIT/memory/scan/split/tone) reported as
-  // off/zero. NOTE: the exact field widths here are reconstructed from
-  // the general Kenwood IF convention, not confirmed character-for-
-  // character against QMX's own manual text (only a paraphrased summary
-  // of it was available while writing this) - if FLRig's status display
-  // looks wrong (frequency in the wrong place, mode misread) while FA/
-  // MD/TQ individually work fine, this is the first place to check,
-  // ideally against a packet capture of a real QMX's IF response.
+  // minibitx doesn't have (XIT/memory/scan/split/tone) reported as
+  // off/zero. RIT is real now (radio_get_rit()/radio_rit_enabled()) -
+  // the 5-char signed offset and the RIT-on digit both reflect actual
+  // state; the field WIDTH is deliberately unchanged from the all-zero
+  // version this replaced, so whatever confidence or doubt applied to
+  // the overall layout before still applies equally now, just with a
+  // real number in one more place. NOTE: the exact field widths here are
+  // reconstructed from the general Kenwood IF convention, not confirmed
+  // character-for-character against QMX's own manual text (only a
+  // paraphrased summary of it was available while writing this) - if
+  // FLRig's status display looks wrong (frequency in the wrong place,
+  // mode misread, RIT digits landing somewhere unexpected) while FA/MD/
+  // TQ/RT individually work fine, this is the first place to check,
+  // ideally against a packet capture of a real QMX's IF response. ---
   if (len == 2 && strncmp(cmd, "IF", 2) == 0) {
     static char last[40] = "";
-    char buf[40], log_line[80];
-    snprintf(buf, sizeof(buf), "IF%011d00000+0000000%02d%d%s00000000;", freq_hdr,
+    char buf[40], log_line[96];
+    int rit = radio_get_rit();
+    int rit_on = radio_rit_enabled();
+    snprintf(buf, sizeof(buf), "IF%011d00000%+05d%d00%02d%d%s00000000;", freq_hdr,
+             rit, rit_on ? 1 : 0,
              0 /* memory channel */, in_tx ? 1 : 0, cat_current_mode);
     cat_send(buf);
-    snprintf(log_line, sizeof(log_line), "cat: IF -> sent (freq %d, %s, mode %s)\n", freq_hdr,
-             in_tx ? "TX" : "RX", cat_current_mode);
+    snprintf(log_line, sizeof(log_line), "cat: IF -> sent (freq %d, RIT %+d%s, %s, mode %s)\n",
+             freq_hdr, rit, rit_on ? " on" : " (off)", in_tx ? "TX" : "RX", cat_current_mode);
     cat_log_get(last, sizeof(last), buf, log_line);
     return;
   }
