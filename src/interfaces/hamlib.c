@@ -145,10 +145,15 @@ static int handle_line(int fd, char *line)
     }
 
     if (cmd[0] == 'l' && (cmd[1] == '\0' || cmd[1] == ' ')) {
-        // get_level <name> - only AF (audio/volume) is backed by anything
-        // real; everything else in the hamlib level set (RF, SQL, preamp,
-        // attenuator, ...) has no minibitx equivalent, same spirit as
-        // dump_state's empty preamp/attenuator lists above.
+        // get_level <name> - AF (audio/volume) and STRENGTH (S-meter) are
+        // backed by something real; everything else in the hamlib level
+        // set (RF, SQL, preamp, attenuator, ...) has no minibitx
+        // equivalent, same spirit as dump_state's empty preamp/attenuator
+        // lists above. Unlike u/U NARROW, STRENGTH IS a real Hamlib
+        // RIG_LEVEL (see dump_state's comment below), so this replies in
+        // the standard convention real Hamlib clients expect - see
+        // rx_audio_get_strength_db()'s comment for what the number means
+        // and doesn't mean.
         char level_name[32] = "";
         sscanf(cmd + 1, "%31s", level_name);
         if (strcmp(level_name, "AF") == 0) {
@@ -156,6 +161,12 @@ static int handle_line(int fd, char *line)
             snprintf(buf, sizeof(buf), "%.6f\n", rx_audio_get_volume() / 100.0);
             send_line(fd, buf);
             printf("rigctl: l AF -> %d%%\n", rx_audio_get_volume());
+        } else if (strcmp(level_name, "STRENGTH") == 0) {
+            int db = rx_audio_get_strength_db();
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d\n", db);
+            send_line(fd, buf);
+            printf("rigctl: l STRENGTH -> %d (dB relative to S9)\n", db);
         } else {
             send_rprt(fd, -1);
             printf("rigctl: l %s -> unsupported level\n", level_name);
@@ -164,7 +175,11 @@ static int handle_line(int fd, char *line)
     }
 
     if (cmd[0] == 'L' && cmd[1] == ' ') {
-        // set_level <name> <value 0.0-1.0>
+        // set_level <name> <value 0.0-1.0> - STRENGTH deliberately has no
+        // case here: it's read-only, same as a real rig's S-meter, so
+        // "L STRENGTH ..." falls through to the unsupported-level reply
+        // below, matching real Hamlib rigs (nothing implements set_level
+        // for RIG_LEVEL_STRENGTH).
         char level_name[32] = "";
         double val = 0.0;
         if (sscanf(cmd + 1, "%31s %lf", level_name, &val) == 2 &&
@@ -250,9 +265,14 @@ static int handle_line(int fd, char *line)
         // onboard filters, since the SDR app does all of that in
         // software - and an empty TX range, since minibitx has no TX
         // audio path yet even though radio_set_tx() can key PTT.
-        // has_get_level/has_set_level do advertise RIG_LEVEL_AF (1<<3 =
-        // 0x8, per hamlib's rig.h) - the one real level, backed by
-        // rx_audio_set_volume()/rx_audio_get_volume() via l/L AF above.
+        // has_get_level advertises RIG_LEVEL_AF (1<<3 = 0x8) OR'd with
+        // RIG_LEVEL_STRENGTH (1<<30 = 0x40000000, per hamlib's rig.h) =
+        // 0x40000008 - the two real levels, backed by
+        // rx_audio_set_volume()/rx_audio_get_volume() via l/L AF and
+        // rx_audio_get_strength_db() via l STRENGTH above. has_set_level
+        // stays 0x8 (AF only): STRENGTH is deliberately absent from it,
+        // same as on a real rig - S-meter readings are get_level-only,
+        // there's no "set the S-meter" operation (see L's own comment).
         // has_get_func/has_set_func stay 0x0 despite u/U NARROW above
         // actually doing something: NARROW isn't a real RIG_FUNC bit (see
         // u/U's own comment), and this dump_state is only ever read by
@@ -275,8 +295,8 @@ static int handle_line(int fd, char *line)
         send_line(fd, "\n");                          // attenuator list (empty)
         send_line(fd, "0x0\n");                       // has_get_func
         send_line(fd, "0x0\n");                       // has_set_func
-        send_line(fd, "0x8\n");                       // has_get_level (RIG_LEVEL_AF)
-        send_line(fd, "0x8\n");                       // has_set_level (RIG_LEVEL_AF)
+        send_line(fd, "0x40000008\n");                // has_get_level (RIG_LEVEL_AF | RIG_LEVEL_STRENGTH)
+        send_line(fd, "0x8\n");                       // has_set_level (RIG_LEVEL_AF only)
         send_line(fd, "0x0\n");                       // has_get_parm
         send_line(fd, "0x0\n");                       // has_set_parm
         printf("rigctl: dump_state -> sent\n");
