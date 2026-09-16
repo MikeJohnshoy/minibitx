@@ -39,13 +39,14 @@ It implements a small plain-text rigctl command set:
 
 | Command | Behavior |
 |---|---|
-| `f` / `F <hz>` | get / set frequency — `F` calls `radio_tune_to()` |
+| `f` / `F <hz>` | get / set frequency — `F` calls `radio_tune_to()`, which also clears RIT back to 0 (see `j`/`J` below) |
 | `t` / `T <0\|1>` | get / set PTT — `T` calls `radio_set_tx()`; any nonzero value means TX (no separate mic/data state) |
+| `j` / `J <hz>` | get / set RIT — a receive-only tuning offset, `radio_set_rit()`/`radio_get_rit()` (`radio.c`), range `+/-RIT_MAX_HZ` (`radio.h`, 9999 Hz). Applied to RX's clk2 only; TX's own clk2 (`radio_tx_apply()`) never sees it, so RIT never moves your transmit frequency. Persists across your own TX bursts (restored the moment TX drops back to RX) but auto-clears on the next `F` — a RIT offset dialed in against one frequency has no defined meaning on a different one. |
 | `m` / `M <mode> <passband>` | get / set mode — **cosmetic only**, stored but never acted on, since minibitx has no onboard demod |
 | `l` / `L <level> <value>` | get / set a hamlib "level" — only `AF` (audio/volume, 0.0-1.0) is backed by anything real, wired to `rx_audio.c`'s `rx_audio_get_volume()`/`rx_audio_set_volume()`; every other hamlib level (`RF`, `SQL`, preamp, ...) gets an error reply, same as an unknown command |
 | `u` / `U <func> <0\|1>` | get / set a hamlib "function" — only `NARROW` is backed by anything real: toggles `rx_audio.c`'s stage-3 narrow (~300Hz) post-demod CW filter on/off via `rx_audio_get_narrow_filter()`/`rx_audio_set_narrow_filter()`. `NARROW` isn't a name real Hamlib ships in its own function table — this server only ever talks to `tools/rigctl_panel.py`, not stock `rigctl`, so there's no compatibility reason to hunt for a closer standard name. Everything else gets an error reply. |
 | `chk_vfo` | always reports "not in VFO mode" (single-VFO radio) |
-| `dump_state` | minimal capability dump for client negotiation — deliberately advertises no RIT/XIT/IF-shift/preamp/attenuator/onboard-filter support, and an empty TX range (no TX audio path yet) |
+| `dump_state` | minimal capability dump for client negotiation — advertises a real `max_rit` (`RIT_MAX_HZ`) now that `j`/`J` are backed by something; still deliberately reports no XIT/IF-shift/preamp/attenuator/onboard-filter support, and an empty TX range (no TX audio path yet) |
 | `q` / `Q` / `quit` | disconnect |
 
 It's a small command set on purpose: minibitx isn't the thing making
@@ -108,7 +109,7 @@ only bare "get" queries do):
 | `TX` / `RX` | bare, immediate PTT, no reply — calls `radio_set_tx()`, same "local CW key wins" guard as Hamlib's `T` |
 | `TQ` | get / set PTT (0/1) — another way to ask for the same thing as `TX`/`RX` |
 | `MD` | get / set mode — **cosmetic only**, same reasoning as Hamlib's `M`; defaults to `3` (CW), the one mode minibitx can actually transmit |
-| `IF` | get only — combined status string (frequency, TX/RX, mode); RIT/XIT/memory/scan/split/tone all reported as off/zero since minibitx has none of them |
+| `IF` | get only — combined status string (frequency, TX/RX, mode); RIT/XIT/memory/scan/split/tone all reported as off/zero — RIT is real now over rigctld's `j`/`J` (above), just not wired into this string yet; the rest minibitx still doesn't have at all |
 | `AG` | get / set AF (volume) gain, Kenwood format (1-digit VFO selector, ignored — single VFO — + 3-digit level 000-255) — calls the same `rx_audio_set_volume()`/`rx_audio_get_volume()` `hamlib.c`'s `l`/`L AF` already uses, just reached over the CAT wire format instead of rigctld's. FLRig's volume slider sends a continuous stream of `AG0nnn;` sets while dragged (not just on release); each one is just applied directly. |
 
 Anything else is silently ignored, matching real Kenwood radios rather
