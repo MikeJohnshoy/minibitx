@@ -180,6 +180,46 @@ static int handle_line(int fd, char *line)
         return 0;
     }
 
+    if (cmd[0] == 'u' && (cmd[1] == '\0' || cmd[1] == ' ')) {
+        // get_func <name> - only NARROW (the post-demod "single signal"
+        // selectivity filter, rx_audio.c stage 3) is backed by anything
+        // real, same "everything else has no minibitx equivalent" spirit
+        // as l/L AF above. NARROW isn't a name real Hamlib ships in its
+        // own function table - this rigctld subset only ever talks to
+        // tools/rigctl_panel.py, not stock rigctl, so there's no
+        // compatibility reason to hunt for a closer standard name.
+        char func_name[32] = "";
+        sscanf(cmd + 1, "%31s", func_name);
+        if (strcmp(func_name, "NARROW") == 0) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d\n", rx_audio_get_narrow_filter());
+            send_line(fd, buf);
+            printf("rigctl: u NARROW -> %s\n",
+                   rx_audio_get_narrow_filter() ? "on" : "off");
+        } else {
+            send_rprt(fd, -1);
+            printf("rigctl: u %s -> unsupported function\n", func_name);
+        }
+        return 0;
+    }
+
+    if (cmd[0] == 'U' && cmd[1] == ' ') {
+        // set_func <name> <0|1>
+        char func_name[32] = "";
+        int val = 0;
+        if (sscanf(cmd + 1, "%31s %d", func_name, &val) == 2 &&
+            strcmp(func_name, "NARROW") == 0) {
+            rx_audio_set_narrow_filter(val != 0);
+            send_rprt(fd, 0);
+            printf("rigctl: U NARROW %d -> narrow filter %s\n", val,
+                   val ? "on" : "off");
+        } else {
+            send_rprt(fd, -1);
+            printf("rigctl: U %s -> unsupported function or bad args\n", cmd + 1);
+        }
+        return 0;
+    }
+
     if (cmd[0] == 'v' && (cmd[1] == '\0' || cmd[1] == ' ')) {
         // get_vfo - minibitx has only one VFO, always report it
         send_line(fd, "VFOA\n");
@@ -213,6 +253,11 @@ static int handle_line(int fd, char *line)
         // has_get_level/has_set_level do advertise RIG_LEVEL_AF (1<<3 =
         // 0x8, per hamlib's rig.h) - the one real level, backed by
         // rx_audio_set_volume()/rx_audio_get_volume() via l/L AF above.
+        // has_get_func/has_set_func stay 0x0 despite u/U NARROW above
+        // actually doing something: NARROW isn't a real RIG_FUNC bit (see
+        // u/U's own comment), and this dump_state is only ever read by
+        // tools/rigctl_panel.py, which doesn't gate anything on it - real
+        // rigctl/Hamlib clients would have no bit to advertise it under.
         send_line(fd, "0\n");                        // protocol version
         send_line(fd, "1\n");                        // rig model (1 = RIG_MODEL_DUMMY)
         send_line(fd, "2\n");                         // ITU region (best-effort default)
