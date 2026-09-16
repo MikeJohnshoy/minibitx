@@ -76,4 +76,32 @@ void rx_audio_process(const double *i_samples, const double *q_samples,
 // normal callers.
 double rx_audio_debug_agc_envelope(void);
 
+// Debug/test only - the METER envelope's current smoothed estimate (see
+// rx_audio.c's "Two envelopes, two jobs" above rx_audio_get_strength_db()).
+// Unlike rx_audio_debug_agc_envelope() above, this one DOES track stage
+// 1's image rejection and stage 3's selectivity/bypass state, by design -
+// it's tapped from narrowed (post-stage-3-or-bypass, pre-AGC-gain), not
+// the raw input. Exists mainly so test_rx_audio.c can check that
+// distinction directly rather than only indirectly through
+// rx_audio_get_strength_db()'s rounded dB output. Not needed by normal
+// callers.
+double rx_audio_debug_meter_envelope(void);
+
+// Current signal-strength estimate for rigctld's "l STRENGTH" (hamlib.c) -
+// a real Hamlib RIG_LEVEL, unlike NARROW above, so it's implemented in
+// the standard convention real Hamlib clients expect: an integer number
+// of dB relative to a nominal S9 reference (0 = S9, negative = below S9
+// in 6dB/S-unit steps down toward S0, positive = "S9+N dB"). Built on the
+// METER envelope (rx_audio_debug_meter_envelope() above), NOT the AGC's
+// own agc_env - deliberately: this reads what's actually reaching the
+// speaker (post image-rejection, post narrow-filter-or-bypass), not "how
+// much energy is anywhere in the whole captured band" the way an
+// agc_env-based reading would. Read-only and NOT wattmeter/signal-
+// generator calibrated either way - see rx_audio.c and
+// docs/dsp_design_notes/rx_gain_and_level_calibration.md §9 for exactly
+// what the reference point does and doesn't mean, and for the earlier,
+// wideband version this replaced. No set_level equivalent, same as a
+// real rig's S-meter.
+int rx_audio_get_strength_db(void);
+
 #endif /* RX_AUDIO_H */
