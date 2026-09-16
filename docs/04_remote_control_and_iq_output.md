@@ -106,10 +106,13 @@ only bare "get" queries do):
 |---|---|
 | `ID` | get only — always replies `020` (the TS-480's ID code) |
 | `FA` / `FB` | get / set frequency, 11-digit Hz — `FA` calls `radio_tune_to()`; `FB` mirrors `FA` on get and is accepted-but-ignored on set (single VFO) |
+| `RT` | get / set RIT on/off (`RT0;`/`RT1;`) — `radio_set_rit_enabled()`/`radio_rit_enabled()` (`radio.h`). Unlike Hamlib's `j`/`J`, Kenwood CAT has a genuine independent enable bit: flipping RIT off leaves whatever's dialed in via `RU`/`RD` below untouched, same as a real rig's RIT ON/OFF button vs its RIT knob. |
+| `RC` | RIT/XIT clear, no reply — calls `radio_set_rit(0)`, same as Hamlib's `J 0` (zeroes the value **and** disables it, see `radio_set_rit()`'s comment in `radio.c`) |
+| `RU` / `RD` | step RIT up/down by a fixed 10 Hz per call (`CAT_RIT_STEP_HZ`), clamped to `+/-RIT_MAX_HZ`, no reply — implicitly re-enables RIT via `radio_set_rit()`, same as turning a real RIT knob does regardless of the ON/OFF button's last state. A real rig's optional step-count suffix (`RU005;`) is accepted but ignored — minibitx has no configured step size to multiply it against |
 | `TX` / `RX` | bare, immediate PTT, no reply — calls `radio_set_tx()`, same "local CW key wins" guard as Hamlib's `T` |
 | `TQ` | get / set PTT (0/1) — another way to ask for the same thing as `TX`/`RX` |
 | `MD` | get / set mode — **cosmetic only**, same reasoning as Hamlib's `M`; defaults to `3` (CW), the one mode minibitx can actually transmit |
-| `IF` | get only — combined status string (frequency, TX/RX, mode); RIT/XIT/memory/scan/split/tone all reported as off/zero — RIT is real now over rigctld's `j`/`J` (above), just not wired into this string yet; the rest minibitx still doesn't have at all |
+| `IF` | get only — combined status string (frequency, RIT, TX/RX, mode). RIT's 5-char signed offset and on/off digit are real now (`radio_get_rit()`/`radio_rit_enabled()`); XIT/memory/scan/split/tone are still reported as off/zero — minibitx has none of those. The field width for the RIT portion is unchanged from the all-zero version this replaced — see `usb_gadget.c`'s own comment on this command for the layout's confidence level (reconstructed from general convention, not confirmed against a packet capture) |
 | `AG` | get / set AF (volume) gain, Kenwood format (1-digit VFO selector, ignored — single VFO — + 3-digit level 000-255) — calls the same `rx_audio_set_volume()`/`rx_audio_get_volume()` `hamlib.c`'s `l`/`L AF` already uses, just reached over the CAT wire format instead of rigctld's. FLRig's volume slider sends a continuous stream of `AG0nnn;` sets while dragged (not just on release); each one is just applied directly. |
 
 Anything else is silently ignored, matching real Kenwood radios rather
