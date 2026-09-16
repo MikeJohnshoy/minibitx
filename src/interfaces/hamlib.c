@@ -13,12 +13,14 @@
 #include <netinet/tcp.h>
 #include "hamlib.h"
 #include "cw.h"
+#include "radio.h"    // freq_hdr, in_tx, radio_tune_to()/radio_set_tx(),
+                       // RIT_MAX_HZ, radio_get_rit()/radio_set_rit() -
+                       // previously hand-declared below one at a time;
+                       // now pulled in directly since the J command
+                       // needs RIT_MAX_HZ too and duplicating that
+                       // constant here would risk it drifting out of
+                       // sync with radio.h's real one.
 #include "rx_audio.h"
-
-extern int freq_hdr;    // current frequency, Hz - see radio.h
-extern int in_tx;       // 0 = RX, 1 = TX - see radio.h
-extern void radio_tune_to(uint32_t f);
-extern void radio_set_tx(int tx_on);
 
 static int listen_fd = -1;
 static volatile int running = 0;
@@ -116,6 +118,39 @@ static int handle_line(int fd, char *line)
         radio_set_tx(tx_on);
         send_rprt(fd, 0);
         printf("rigctl: T %ld -> %s\n", v, tx_on ? "TX on" : "TX off");
+        return 0;
+    }
+
+    if (cmd[0] == 'j' && (cmd[1] == '\0' || cmd[1] == ' ')) {
+        // get_rit - a signed Hz offset, same convention as get_freq. 0
+        // means no RIT applied, matching how real Hamlib rigs treat RIT
+        // (there's no separate on/off bit in the core protocol - see J
+        // below).
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d\n", radio_get_rit());
+        send_line(fd, buf);
+        printf("rigctl: j -> %d Hz\n", radio_get_rit());
+        return 0;
+    }
+
+    if (cmd[0] == 'J' && (cmd[1] == '\0' || cmd[1] == ' ')) {
+        // set_rit <hz> - receive-only offset, +/-RIT_MAX_HZ (radio.h).
+        // "J 0" is how a real rigctl client turns RIT off, same as
+        // dialing it back to zero on the front panel - there's nothing
+        // to enable/disable beyond the value itself. Auto-clears back to
+        // 0 on the next F - see radio_tune_to()'s comment (radio.c) -
+        // and never touches TX's own clk2 line at all - see
+        // radio_set_rit()'s comment there for why that's RX-only by
+        // design, not a limitation.
+        long hz = strtol(cmd + 1, NULL, 10);
+        if (hz < -RIT_MAX_HZ || hz > RIT_MAX_HZ) {
+            send_rprt(fd, -1);
+            printf("rigctl: J %ld -> out of range (+/-%d Hz), ignored\n", hz, RIT_MAX_HZ);
+            return 0;
+        }
+        radio_set_rit((int)hz);
+        send_rprt(fd, 0);
+        printf("rigctl: J %ld -> RIT %+ld Hz\n", hz, hz);
         return 0;
     }
 
@@ -261,10 +296,13 @@ static int handle_line(int fd, char *line)
         // Minimal, spec-shaped dump_state (format confirmed against
         // Hamlib's own rigctl_parse.c dump_state() implementation).
         // Deliberately advertises no capabilities minibitx doesn't
-        // actually have - no RIT/XIT/IF shift, no preamp/attenuator, no
+        // actually have - no XIT/IF shift, no preamp/attenuator, no
         // onboard filters, since the SDR app does all of that in
         // software - and an empty TX range, since minibitx has no TX
-        // audio path yet even though radio_set_tx() can key PTT.
+        // audio path yet even though radio_set_tx() can key PTT. RIT is
+        // the one exception now: max_rit below is real (RIT_MAX_HZ,
+        // radio.h), backed by radio_get_rit()/radio_set_rit() via j/J
+        // above.
         // has_get_level advertises RIG_LEVEL_AF (1<<3 = 0x8) OR'd with
         // RIG_LEVEL_STRENGTH (1<<30 = 0x40000000, per hamlib's rig.h) =
         // 0x40000008 - the two real levels, backed by
@@ -287,7 +325,11 @@ static int handle_line(int fd, char *line)
         send_line(fd, "0x1ff 1\n");                   // one tuning step: 1 Hz, all modes
         send_line(fd, "0 0\n");                       // tuning step list terminator
         send_line(fd, "0 0\n");                       // empty filter list
-        send_line(fd, "0\n");                         // max_rit
+        {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d\n", RIT_MAX_HZ);
+            send_line(fd, buf);                        // max_rit - real now, see j/J above
+        }
         send_line(fd, "0\n");                         // max_xit
         send_line(fd, "0\n");                         // max_ifshift
         send_line(fd, "0\n");                         // announces
