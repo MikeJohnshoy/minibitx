@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
   rx_audio_init();
   printf("init: RX audio demod ready (CW pitch %d Hz)\n", CW_PITCH_HZ);
 
-  // Bring up the rigctld-compatible control surface (src/hamlib.c) first -
+  // Bring up the rigctld-compatible control surface (src/interfaces/hamlib.c) first -
   // not a hard failure if the port's unavailable, same as HPSDR/UAC2.
   // hamlib_init() reports its own success; we only report the failure
   // case here. Started before HPSDR purely so startup mirrors the
@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
   }
  
   // Bring up the Kenwood TS-480-subset CAT control surface (the CAT
-  // section of src/usb_gadget.c), over the same gadget's CDC-ACM
+  // section of src/interfaces/usb_gadget.c), over the same gadget's CDC-ACM
   // function uac_init() just created above. Independent from here on:
   // cat_init() opens /dev/ttyGS0 itself on its own thread and keeps
   // retrying with backoff regardless of whether the ACM function
