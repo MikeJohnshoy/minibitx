@@ -137,7 +137,7 @@ hands back whatever's freshest each tick.
 
 ## Bench verification
 
-All done against the real source files (`src/iq_stream.c` linked
+All done against the real source files (`src/interfaces/iq_stream.c` linked
 unmodified into a small standalone C test harness feeding a synthetic
 1kHz complex tone; `tools/rigctl_panel.py`'s `SpectrumClient` imported
 directly, with `tkinter` stubbed out so it can run in a display-less
