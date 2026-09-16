@@ -28,7 +28,25 @@ int rx_audio_get_volume(void);
 // are deliberately independent) - is a fixed 8-pole elliptic design, not
 // runtime-adjustable. An earlier revision had a rx_audio_set_filter_bw()
 // here; it's gone deliberately, not an oversight - see rx_audio.c's
-// "Why elliptic, and why fixed" for why.
+// "Why elliptic, and why fixed" for why: the SHAPE (coefficients) is
+// fixed. Whether the operator hears it at all is a different, much
+// cheaper question - rx_audio_set_narrow_filter() below just switches
+// between the filter's output and its bypass, no coefficient math
+// involved, so it doesn't reopen that earlier decision.
+
+// Enable (1, the default) or bypass (0) stage 3, the narrow filter
+// above. The filter itself keeps running either way (its history stays
+// warm) - only which signal reaches stage 4's AGC/output changes - so
+// there's no settling-time thump when toggling back on. Wired to
+// rigctld's "u"/"U NARROW" (hamlib.c) so the control panel (tools/
+// rigctl_panel.py) can toggle it remotely - see rx_audio.c for why this
+// is a plain on/off rather than a runtime-adjustable width.
+void rx_audio_set_narrow_filter(int enable);
+
+// Current narrow-filter enable state, 0 or 1 - same "let a client read
+// back what it didn't itself just set" reasoning as
+// rx_audio_get_volume().
+int rx_audio_get_narrow_filter(void);
 
 // Demodulates one block's worth of already-mixed baseband I/Q (the same
 // i_samples[]/q_samples[] sound.c's sound_process() already computes for
