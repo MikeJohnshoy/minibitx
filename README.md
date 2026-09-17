@@ -61,7 +61,7 @@ Changes:
 - bit-banging code replaced with kernel functions
 - wiringPi replaced with libgpio
 - DSP processing no longer FFT-based
-  - cw receive mode uses AGC across entire IF bandwidth to set usable signal into A/D convertor
+  - cw receive mode uses AGC across entire IF bandwidth to set usable signal level into A/D convertor
   - CW receive processing uses a FIR filter for unwanted image rejection
   - sharp 8-pole elliptic filter for 300 Hz cw filter
   - on TX, cw waveform is built at high end of baseband IF, and then mixed to crystal filter freq where the unwanted product is well outside the crystal filter
