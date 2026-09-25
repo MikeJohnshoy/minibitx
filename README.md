@@ -59,7 +59,7 @@ minibitx is quite small - much of the code is in the interface software that pas
 
 Changes: 
 - bit-banging code replaced with kernel functions
-- wiringPi replaced with libgpio
+- wiringPi replaced with gpio
 - DSP processing no longer FFT-based
   - cw receive mode uses AGC across entire IF bandwidth to set usable signal level into A/D convertor
   - CW receive processing uses a FIR filter for unwanted image rejection
