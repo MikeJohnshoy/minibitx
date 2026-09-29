@@ -1,5 +1,6 @@
 # minibitx — an experimental test bed
-
+>>> NOTE: NEW WORK IS NOW FOCUSED ON THE 'maxibitx' TEST BED  <<<
+>>> 
 minibitx is a project to experiment with software from the sbitx codebase. 
 The 'mini' in minibitx means we're assembling the minimal set of code necessary to configure and operate the sbitx hardware with the best performance possible.
 Code for each required function has been pulled from the sbitx baseline, refined and added into minibitx.
